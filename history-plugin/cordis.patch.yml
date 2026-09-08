@@ -1,0 +1,16 @@
+# The session-history layer: one insert naming this package. `dsh plugin` adds
+# this package to dsh.profile.bundles because it declares dsh.bundle, and the
+# patch below is what makes the row a mounted Loader entry.
+#
+# Every value here is a Config field of src/index.ts — the shortcut is
+# deliberately not hardcoded (dsh forbids hardcoded tunables in plugins).
+- insert:
+    - id: session-history
+      name: 'dsh-session-history'
+      config:
+        key: 's'
+        ctrl: true
+        alt: false
+        shift: false
+        meta: false
+        maxRows: 50

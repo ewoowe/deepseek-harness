@@ -1,0 +1,29 @@
+{
+  "compilerOptions": {
+    "target": "es2024",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "lib": ["ES2024", "DOM", "DOM.Iterable"],
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "allowImportingTsExtensions": true,
+    "types": [],
+    // Read-only source-plane resolution into the checkout: this plugin never
+    // edits packages/, it only points the IDE at their sources for types.
+    // Every import from these paths is type-only and erased at build time.
+    "paths": {
+      "@deepseek-ai/cordis": ["../vendor/cordis/src"],
+      "@deepseek-ai/schemastery": ["../vendor/schemastery/src"],
+      "@deepseek-ai/dsh-session/types": ["../packages/core/session/src/types.ts"],
+      "@deepseek-ai/dsh-api-session-controller/client": ["../packages/api/session-controller/src/client/index.ts"],
+      "@deepseek-ai/dsh-client-locale/client": ["../packages/client/locale/src/client/index.ts"],
+      "@deepseek-ai/dsh-client-ui-primitives": ["../packages/client/ui-primitives/src/index.ts"],
+      "@deepseek-ai/dsh-client-ui-slots": ["../packages/client/ui-slots/src/index.ts"],
+      "@deepseek-ai/dsh-client-ui-renderer/client": ["../packages/client/ui-renderer/src/client/index.ts"],
+      "@deepseek-ai/dsh-host-webserver": ["../packages/host/webserver/src/index.ts"]
+    }
+  },
+  "include": ["src"]
+}
