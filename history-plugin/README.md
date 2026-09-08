@@ -44,10 +44,14 @@ pnpm dsh plugin --profile web remove dsh-session-history
 |---|---|
 | `Ctrl+S` | 打开／关闭消息列表 |
 | `↑` `↓` | 移动高亮 |
+| `Alt`+`↑` `↓`、`PageUp` `PageDown` | 翻页：列表滚一屏，高亮**停在原处**不动（到首尾时贴边） |
 | `Enter` | 跳转到高亮那条消息 |
 | 鼠标移动 / 点击 | 移动高亮 / 跳转 |
 | `Esc` | 关闭 |
 | 「加载更早的消息」 | 翻入更早一页历史并重建列表 |
+
+翻页的 `Alt` 在 macOS 上就是 `⌥ Option`（同一个物理键，提示栏会按平台显示对应字样）；
+MacBook 无独立翻页键时可用 `Fn`+`↑` `↓`，macOS 会把它转成 `PageUp`／`PageDown`。
 
 ## 配置
 
