@@ -22,6 +22,8 @@
       "@deepseek-ai/dsh-client-ui-primitives": ["../packages/client/ui-primitives/src/index.ts"],
       "@deepseek-ai/dsh-client-ui-slots": ["../packages/client/ui-slots/src/index.ts"],
       "@deepseek-ai/dsh-client-ui-renderer/client": ["../packages/client/ui-renderer/src/client/index.ts"],
+      "@deepseek-ai/dsh-settings": ["../packages/settings/settings/src"],
+      "@deepseek-ai/dsh-client-ui-settings/client": ["../packages/client/ui-settings/src/client"],
       "@deepseek-ai/dsh-host-webserver": ["../packages/host/webserver/src/index.ts"]
     }
   },
