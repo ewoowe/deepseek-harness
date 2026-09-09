@@ -14,6 +14,10 @@ export type HistoryKey =
   | 'hintClose'
   | 'settingsTitle'
   | 'settingsDescription'
+  | 'expand'
+  | 'collapse'
+  | 'unsaved'
+  | 'readOnly'
   | 'fieldKey'
   | 'fieldKeyHint'
   | 'fieldCtrl'
@@ -45,6 +49,10 @@ const en: Record<HistoryKey, string> = {
   hintClose: 'close',
   settingsTitle: 'Session history',
   settingsDescription: 'Keyboard shortcut and list size for the in-session message jump overlay.',
+  expand: 'Expand',
+  collapse: 'Collapse',
+  unsaved: 'Unsaved',
+  readOnly: 'The settings document of this deployment is read-only.',
   fieldKey: 'Chord key',
   fieldKeyHint: 'The single KeyboardEvent.key character that opens the overlay. Case-insensitive.',
   fieldCtrl: 'Require Control',
@@ -77,6 +85,10 @@ const zh: Record<HistoryKey, string> = {
   hintClose: '关闭',
   settingsTitle: '会话历史',
   settingsDescription: '弹窗式消息跳转的快捷键和列表大小。',
+  expand: '展开',
+  collapse: '收起',
+  unsaved: '未保存',
+  readOnly: '本部署的设置文档是只读的。',
   fieldKey: '唤出键',
   fieldKeyHint: '打开弹窗的 KeyboardEvent.key 单字符；大小写不敏感。',
   fieldCtrl: '需要 Ctrl',

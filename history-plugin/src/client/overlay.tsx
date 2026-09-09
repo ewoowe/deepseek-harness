@@ -43,6 +43,8 @@ export interface MessageEntry {
 export interface HistoryOverlaySlotProps {
   /** Injected: page one earlier history window in, if any remains. */
   loadOlder: () => Promise<void>
+  /** Injected: whether older history remains to page in. */
+  hasMore: () => boolean
   /** Locale-bound translate function. */
   t: Translate<HistoryKey>
 }
@@ -52,6 +54,8 @@ interface OverlayProps {
   readonly config: HistoryConfig
   /** Injected: page one earlier history window in. */
   readonly loadOlder: () => Promise<void>
+  /** Injected: whether older history remains to page in. */
+  readonly hasMore: () => boolean
   /** Locale-bound translate function. */
   readonly t: Translate<HistoryKey>
 }
@@ -198,6 +202,20 @@ const FOLLOW_THRESHOLD_PX = 24
  * row on the common chat density.
  */
 const VISIBLE_MIN_PX = 30
+
+/**
+ * How close to the oldest loaded row the highlight must get before older
+ * history is paged in automatically. Generous enough that a page-sized jump
+ * (≈14 rows) lands the reader with history already present.
+ */
+const PREFETCH_AHEAD = 8
+
+/**
+ * Consecutive pages that add no user message before a fill loop gives up.
+ * A history page is 50 durable events, and a tool-heavy stretch can hold none
+ * of ours, so a single empty page is normal — three in a row is not.
+ */
+const MAX_NO_PROGRESS = 3
 
 /** One collection pass over the rendered transcript. */
 interface Collected {
@@ -400,11 +418,17 @@ const DIALOG_CLOSE_STYLE: CSSProperties = {
 interface MetaRowProps {
   readonly count: number
   readonly loading: boolean
+  /** False once the session's history is exhausted; the button then rests. */
+  readonly canLoadMore: boolean
   readonly t: Translate<HistoryKey>
   readonly onLoadOlder: () => void
 }
 
-function MetaRow({ count, loading, t, onLoadOlder }: MetaRowProps): ReactNode {
+function MetaRow({ count, loading, canLoadMore, t, onLoadOlder }: MetaRowProps): ReactNode {
+  // The button is the fallback, not the primary path: opening and paging both
+  // load on their own. It stays for the exhausted case and for a reader who
+  // simply prefers the pointer.
+  const disabled = loading || !canLoadMore
   return (
     <div style={META_ROW_STYLE}>
       <span style={COUNT_STYLE}>
@@ -413,8 +437,8 @@ function MetaRow({ count, loading, t, onLoadOlder }: MetaRowProps): ReactNode {
       <button
         type="button"
         onClick={onLoadOlder}
-        disabled={loading}
-        style={LOAD_OLDER_STYLE(loading)}
+        disabled={disabled}
+        style={LOAD_OLDER_STYLE(disabled)}
         onMouseEnter={(event) => {
           if (loading) return
           event.currentTarget.style.background = 'var(--dsw-alias-interactive-bg-hover)'
@@ -618,9 +642,16 @@ const KBD_STYLE: CSSProperties = {
  * @param props - the inject face and copy.
  * @returns the overlay tree.
  */
-export function HistoryOverlaySlot({ loadOlder, t }: HistoryOverlaySlotProps): ReactNode {
+export function HistoryOverlaySlot({ loadOlder, hasMore, t }: HistoryOverlaySlotProps): ReactNode {
   const config = useHistoryConfig()
-  return <HistoryOverlay config={config} loadOlder={loadOlder} t={t} />
+  return (
+    <HistoryOverlay
+      config={config}
+      loadOlder={loadOlder}
+      hasMore={hasMore}
+      t={t}
+    />
+  )
 }
 
 /**
@@ -654,19 +685,58 @@ function useHistoryConfig(): HistoryConfig {
 
 /**
  * Render the overlay: closed state returns null but keeps the listeners mounted.
- * @param props - configuration, the paging action, and copy.
+ * @param props - configuration, the paging actions, and copy.
  * @returns the overlay tree.
  */
-export function HistoryOverlay({ config, loadOlder, t }: OverlayProps) {
+export function HistoryOverlay({ config, loadOlder, hasMore, t }: OverlayProps) {
   const [open, setOpen] = useState(false)
-  const [active, setActive] = useState(0)
   const [entries, setEntries] = useState<readonly MessageEntry[]>([])
   const [loading, setLoading] = useState(false)
+  /**
+   * The highlight is tracked by row id, not index. Paging older history
+   * PREPENDS rows, which would silently slide an index-based highlight onto a
+   * different message; the id survives, so the reader keeps their place and the
+   * prefetch below self-limits (their index grows by the rows added).
+   */
+  const [activeId, setActiveId] = useState<string | null>(null)
   // Scroll viewport owned by this component; the keyboard handler scrolls
   // it directly so the rest of the page behind the fixed dialog stays put.
   const listboxRef = useRef<HTMLDivElement | null>(null)
+  /** Synchronous mirror of `entries`: the loader loops must read it inside one pass. */
+  const entriesRef = useRef<readonly MessageEntry[]>([])
+  /** Serializes loads so an effect-driven prefetch cannot race a manual one. */
+  const loadingRef = useRef(false)
+
+  const active = useMemo(() => {
+    if (activeId === null) return Math.max(0, entries.length - 1)
+    const index = entries.findIndex(entry => entry.id === activeId)
+    return index < 0 ? Math.max(0, entries.length - 1) : index
+  }, [entries, activeId])
 
   const close = useCallback(() => { setOpen(false) }, [])
+
+  /**
+   * Publish a collected list, skipping the state update when nothing changed.
+   *
+   * The no-op guard is load-bearing, not an optimization: the fill loops call
+   * this once per page, and the auto-fill effect re-runs on every new `entries`
+   * reference. Without it, a page that adds no message would still produce a
+   * fresh array, which would retrigger the effect, which would run another
+   * fill — an unbounded loop on any session whose history is not yet exhausted.
+   * Identity is by id: `visible` only matters at open time, which recollects.
+   */
+  const applyEntries = useCallback((next: readonly MessageEntry[]) => {
+    const current = entriesRef.current
+    const same = current.length === next.length
+      && current.every((entry, index) => entry.id === next[index]?.id)
+    entriesRef.current = next
+    if (!same) setEntries(next)
+  }, [])
+
+  const setActiveAt = useCallback((index: number) => {
+    const clamped = Math.max(0, Math.min(index, entries.length - 1))
+    setActiveId(entries[clamped]?.id ?? null)
+  }, [entries])
 
   // The list is a snapshot of the rendered window: rebuild on every open so a
   // session that grew (or paged in) while closed is reflected.
@@ -679,12 +749,50 @@ export function HistoryOverlay({ config, loadOlder, t }: OverlayProps) {
   // row is the one to start from.
   const refresh = useCallback(() => {
     const { entries: next, pinnedToBottom } = collectMessages()
-    setEntries(next)
+    applyEntries(next)
     const firstVisible = next.findIndex(entry => entry.visible)
-    setActive(pinnedToBottom
-      ? Math.max(0, next.length - 1)
-      : Math.max(0, firstVisible))
-  }, [])
+    const target = pinnedToBottom ? Math.max(0, next.length - 1) : Math.max(0, firstVisible)
+    setActiveId(next[target]?.id ?? null)
+  }, [applyEntries])
+
+  /**
+   * Wait for the transcript to commit the rows a prepend just produced.
+   * `loadOlder()` resolves when the store is updated, not when React has
+   * rendered; collecting immediately would read the pre-prepend DOM.
+   */
+  const settle = useCallback((): Promise<void> => new Promise((resolve) => {
+    requestAnimationFrame(() => { requestAnimationFrame(() => { resolve() }) })
+  }), [])
+
+  /**
+   * Page older history in until the list holds `minRows` entries.
+   *
+   * Pass `current + 1` to request exactly one more page — the loop condition is
+   * a strict "fewer than", so once a page lands the target is already met.
+   *
+   * Two exits besides meeting the target: `hasMore()` going false (history
+   * exhausted), and {@link MAX_NO_PROGRESS} consecutive pages that add no row
+   * (a tool-heavy stretch with none of our messages, or a broken page).
+   */
+  const fill = useCallback(async (minRows: number): Promise<void> => {
+    if (loadingRef.current) return
+    loadingRef.current = true
+    setLoading(true)
+    try {
+      let stalled = 0
+      while (entriesRef.current.length < minRows && hasMore() && stalled < MAX_NO_PROGRESS) {
+        const before = entriesRef.current.length
+        await loadOlder()
+        await settle()
+        const next = collectMessages().entries
+        applyEntries(next)
+        stalled = next.length > before ? 0 : stalled + 1
+      }
+    } finally {
+      loadingRef.current = false
+      setLoading(false)
+    }
+  }, [applyEntries, hasMore, loadOlder, settle])
 
   // The chord: always armed, toggles the overlay, and suppresses the browser's
   // own binding (Ctrl+S is "save page" in every major browser). Pure toggle —
@@ -705,6 +813,29 @@ export function HistoryOverlay({ config, loadOlder, t }: OverlayProps) {
     if (!open) return
     refresh()
   }, [open, refresh])
+
+  // Auto-fill on open. A freshly opened session shows only its tail window, so
+  // the list would otherwise start shorter than the overlay can hold and the
+  // paging keys would have nothing to page through. Re-runs as `entries` grows,
+  // which is what carries the loop; `fill` itself stops on `hasMore` or on
+  // repeated no-progress pages.
+  useEffect(() => {
+    if (!open) return
+    if (entries.length >= config.maxRows) return
+    void fill(config.maxRows)
+  }, [open, entries, config.maxRows, fill])
+
+  // Prefetch on approach to the oldest loaded row: the reader is about to page
+  // past what we have, so pull the next page in before they get there.
+  //
+  // `+ 1` is "one more page", not a row count — the loop exits as soon as a
+  // page lands. This cannot cascade for the same page: the highlight is held by
+  // id, so prepending N rows moves its index up by N, out of the trigger zone.
+  useEffect(() => {
+    if (!open) return
+    if (active > PREFETCH_AHEAD) return
+    void fill(entries.length + 1)
+  }, [open, active, entries, fill])
 
   // Navigation: armed only while open. Scrolling the highlight into the
   // listbox window is NOT done here — it lives in the effect below, which is
@@ -728,7 +859,7 @@ export function HistoryOverlay({ config, loadOlder, t }: OverlayProps) {
       if (to === active) return
       const keep = rowOffset(listbox, active)
       const moved = rowOffset(listbox, to)
-      setActive(to)
+      setActiveAt(to)
       // Near either end the requested scrollTop runs past the range and the
       // browser clamps it, which is exactly the wanted edge behavior: the
       // highlight stays put mid-list and only shifts where it must.
@@ -759,12 +890,12 @@ export function HistoryOverlay({ config, loadOlder, t }: OverlayProps) {
       }
       if (event.key === 'ArrowDown') {
         event.preventDefault()
-        setActive(index => Math.max(0, Math.min(index + 1, entries.length - 1)))
+        setActiveAt(active + 1)
         return
       }
       if (event.key === 'ArrowUp') {
         event.preventDefault()
-        setActive(index => Math.max(0, Math.min(index - 1, entries.length - 1)))
+        setActiveAt(active - 1)
         return
       }
       if (event.key === 'Enter') {
@@ -779,10 +910,6 @@ export function HistoryOverlay({ config, loadOlder, t }: OverlayProps) {
   }, [open, entries, active])
 
   // A shrinking list must never leave the highlight past its end.
-  useEffect(() => {
-    setActive(index => Math.min(index, Math.max(0, entries.length - 1)))
-  }, [entries.length])
-
   // Keep the highlight inside the listbox window for every path that moves it:
   // opening (the highlight is the first row visible in the transcript, which in
   // a long session sits far below the list window), Arrow navigation (which
@@ -800,21 +927,24 @@ export function HistoryOverlay({ config, loadOlder, t }: OverlayProps) {
     setOpen(false)
   }
 
+  // Manual load: one more page. Shares `fill` so it cannot race the automatic
+  // paths, and keeps the highlight by id rather than resetting it the way
+  // `refresh` does on open.
   const pageOlder = async (): Promise<void> => {
-    setLoading(true)
-    try {
-      await loadOlder()
-      refresh()
-    } finally {
-      setLoading(false)
-    }
+    await fill(entries.length + 1)
   }
 
   if (!open) return null
 
   return (
     <Dialog title={t('title')} closeLabel={t('closeLabel')} onClose={close}>
-      <MetaRow count={entries.length} loading={loading} t={t} onLoadOlder={() => { void pageOlder() }} />
+      <MetaRow
+        count={entries.length}
+        loading={loading}
+        canLoadMore={hasMore()}
+        t={t}
+        onLoadOlder={() => { void pageOlder() }}
+      />
       {entries.length > 0 && (
         <div
           ref={listboxRef}
@@ -829,7 +959,7 @@ export function HistoryOverlay({ config, loadOlder, t }: OverlayProps) {
               entry={entry}
               index={index}
               active={index === active}
-              onActivate={() => { setActive(index) }}
+              onActivate={() => { setActiveAt(index) }}
               onJump={() => { jumpTo(entry.id) }}
               rowIdStr={rowId(index)}
             />

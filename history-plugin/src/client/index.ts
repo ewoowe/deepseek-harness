@@ -71,7 +71,10 @@ function renderSettingsEntry(
   props: { t: (key: HistoryKey, params?: Record<string, unknown>) => string },
   scope: HistoryScope,
 ): ReactNode {
-  return createElement(HistorySettingsCard, { settingsScope: scope, t: props.t })
+  // `scope`, not `settingsScope`: that is the prop name the card declares. A
+  // mismatch here leaves `props.scope` undefined and the card throws inside the
+  // slot's error boundary on its first `scope.getSnapshot()` — it never renders.
+  return createElement(HistorySettingsCard, { scope, t: props.t })
 }
 
 /**
@@ -99,6 +102,13 @@ export function apply(ctx: ClientContext): void {
           if (current === undefined) return
           await scope.sessions.binding(current)?.session.loadOlder()
         },
+        // Whether older history remains. Without this the auto-fill loop could
+        // never tell "exhausted" from "server is slow" and would spin.
+        hasMore: (): boolean => {
+          const current = scope.sessions.list.getSnapshot().current
+          if (current === undefined) return false
+          return scope.sessions.binding(current)?.session.getSnapshot().hasMore === true
+        },
       }),
     }, (props: HistoryOverlaySlotProps) => createElement(HistoryOverlaySlot, props)))
   })
@@ -116,6 +126,8 @@ export function apply(ctx: ClientContext): void {
     publishScope(bound)
     scoped.slots.inject('settings.plugin.item', () => scoped.slots.register({
       name: 'settings.plugin.item',
+      // The card's key is the settings namespace: that is the only thing the
+      // tab uses to pair a Host-served namespace with the card that edits it.
       key: SETTINGS_NAMESPACE,
       locale: NS,
       inject: () => ({

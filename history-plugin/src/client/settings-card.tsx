@@ -10,11 +10,11 @@
  * the shared form machinery.
  */
 import {
-  useCallback, useEffect, useState, useSyncExternalStore,
+  useCallback, useEffect, useRef, useState, useSyncExternalStore,
   type CSSProperties, type ReactNode,
 } from 'react'
 import type { SettingsScope, SettingsScopeSnapshot } from '@deepseek-ai/dsh-client-ui-settings/client'
-import { Switch } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconChevronDownOutline14, Switch } from '@deepseek-ai/dsh-client-ui-primitives'
 import { DEFAULT_CONFIG, type HistoryConfig } from '../shared.ts'
 import type { HistoryKey } from './locales.ts'
 
@@ -36,8 +36,8 @@ const FIELDS = ['key', 'ctrl', 'alt', 'shift', 'meta', 'maxRows'] as const
 type Field = typeof FIELDS[number]
 
 interface SettingsCardProps {
-  /** Bound settings scope for the `session-history` namespace. */
-  scope: HistorySettingsScope
+  /** Bound settings scope for the `session-history` namespace. Absent renders the unavailable state. */
+  scope: HistorySettingsScope | undefined
   /** Locale translate. */
   t: (key: HistoryKey, params?: Record<string, unknown>) => string
 }
@@ -48,11 +48,25 @@ interface SettingsCardProps {
  * elsewhere in the same surface, in case a future change ever touches this
  * namespace).
  */
-function useScope(scope: HistorySettingsScope): SettingsScopeSnapshot<HistoryConfig> {
+/**
+ * Snapshot reported when no scope is bound. The card already renders its
+ * `unavailable` state for a snapshot with no value, so a missing scope degrades
+ * to that message instead of throwing inside the slot's error boundary and
+ * taking the whole card list down with it.
+ */
+const NO_SCOPE_SNAPSHOT = {
+  status: 'unavailable',
+  value: undefined,
+  revision: undefined,
+  writable: false,
+  mode: 'memory',
+} as unknown as SettingsScopeSnapshot<HistoryConfig>
+
+function useScope(scope: HistorySettingsScope | undefined): SettingsScopeSnapshot<HistoryConfig> {
   return useSyncExternalStore(
-    (listener) => scope.subscribe(listener),
-    () => scope.getSnapshot(),
-    () => scope.getSnapshot(),
+    (listener) => (scope === undefined ? () => {} : scope.subscribe(listener)),
+    () => (scope === undefined ? NO_SCOPE_SNAPSHOT : scope.getSnapshot()),
+    () => (scope === undefined ? NO_SCOPE_SNAPSHOT : scope.getSnapshot()),
   )
 }
 
@@ -90,6 +104,15 @@ export function HistorySettingsCard(props: SettingsCardProps): ReactNode {
   const [draft, setDraft] = useState<Draft>({})
   const [saving, setSaving] = useState(false)
   const [failed, setFailed] = useState(false)
+  /**
+   * Collapsed by default, matching the other cards in this section: the list is
+   * a scan of several plugins, so an always-open card pushes the rest off
+   * screen. Disclosure is card-local reading state — the Host has no stake in
+   * which one is open.
+   */
+  const [open, setOpen] = useState(false)
+  /** Whether a save is in flight, so it can collapse only after it settles. */
+  const saveStarted = useRef(false)
 
   // An external write (or the first mount, once status flips from loading to
   // ready) drops a held draft that already matches the canonical value so the
@@ -192,13 +215,40 @@ export function HistorySettingsCard(props: SettingsCardProps): ReactNode {
     setFailed(false)
   }
 
+  // Collapse only after the write settles: a rejected save keeps its error and
+  // the staged values on screen for correction. Matches PluginCard's behavior.
+  useEffect(() => {
+    if (saving) {
+      saveStarted.current = true
+      return
+    }
+    if (!saveStarted.current) return
+    saveStarted.current = false
+    if (!dirty && !failed) setOpen(false)
+  }, [dirty, failed, saving])
+
   return (
     <div style={CARD_STYLE}>
-      <div style={HEADER_STYLE}>
-        <h3 style={TITLE_STYLE}>{t('settingsTitle')}</h3>
-        {saving && <span style={STATUS_STYLE}>{t('saving')}</span>}
-      </div>
-      <p style={DESC_STYLE}>{t('settingsDescription')}</p>
+      <button
+        type="button"
+        style={HEADER_BUTTON_STYLE}
+        aria-expanded={open}
+        aria-label={`${t(open ? 'collapse' : 'expand')}: ${t('settingsTitle')}`}
+        onClick={() => { setOpen(!open) }}
+      >
+        <span style={HEAD_TEXT_STYLE}>
+          <span style={TITLE_STYLE}>{t('settingsTitle')}</span>
+          <span style={DESC_STYLE}>{t('settingsDescription')}</span>
+        </span>
+        {dirty && <span style={PENDING_STYLE}>{t('unsaved')}</span>}
+        <span style={CHEVRON_STYLE(open)} aria-hidden="true">
+          <IconChevronDownOutline14 />
+        </span>
+      </button>
+
+      {open ? (
+        <>
+          {!writable && <p style={STATUS_STYLE} role="status">{t('readOnly')}</p>}
 
       <KeyField
         field="key"
@@ -301,6 +351,8 @@ export function HistorySettingsCard(props: SettingsCardProps): ReactNode {
           {saving ? t('saving') : t('save')}
         </button>
       </div>
+        </>
+      ) : null}
     </div>
   )
 }
@@ -414,11 +466,46 @@ const CARD_STYLE: CSSProperties = {
   boxShadow: 'var(--dsw-elevation-prominent)',
 }
 
-const HEADER_STYLE: CSSProperties = {
+/** The whole header is one button: title stacked over description, chevron at the end. */
+const HEADER_BUTTON_STYLE: CSSProperties = {
   display: 'flex',
   alignItems: 'center',
-  justifyContent: 'space-between',
-  gap: 8,
+  gap: 12,
+  width: '100%',
+  margin: 0,
+  padding: 0,
+  border: 'none',
+  background: 'transparent',
+  color: 'inherit',
+  font: 'inherit',
+  textAlign: 'start',
+  cursor: 'pointer',
+}
+
+const HEAD_TEXT_STYLE: CSSProperties = {
+  flex: 1,
+  minWidth: 0,
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 2,
+}
+
+const CHEVRON_STYLE = (open: boolean): CSSProperties => ({
+  flex: 'none',
+  display: 'inline-flex',
+  color: 'var(--dsw-alias-label-secondary)',
+  transition: 'transform 120ms ease',
+  transform: open ? 'rotate(180deg)' : 'none',
+})
+
+const PENDING_STYLE: CSSProperties = {
+  flex: 'none',
+  padding: '1px 8px',
+  borderRadius: 999,
+  background: 'var(--dsw-alias-bg-fill-1)',
+  fontSize: 11,
+  lineHeight: '18px',
+  color: 'var(--dsw-alias-label-secondary)',
 }
 
 const TITLE_STYLE: CSSProperties = {

@@ -61,25 +61,27 @@ function assertServiceable(config: Config): void {
  * @param config - composition-base configuration from `cordis.patch.yml`.
  */
 export function apply(ctx: Context, config: Config): void {
-  // The mutable holder is what `setSource` rewrites on a saved edit, and the
-  // webserver's `index-inject` listener reads the same holder so a settings
-  // update that lands before the next page render is reflected immediately.
-  // (The overlay itself reads from the bound settings scope — the global
-  // remains for code that hasn't migrated, e.g. a stale browser bundle.)
-  let current: Config = config
+  /**
+   * The authoritative value source. `installSection` hands `setSource` a THUNK
+   * (`() => T`), not a value — see `SettingsSectionHooks.setSource` in
+   * packages/settings. Storing the argument as if it were the value makes this
+   * a function, and spreading a function yields `{}`, which silently published
+   * an empty configuration to the page. Call it; never spread it.
+   */
+  let readSource: () => Config = () => config
 
   ctx.on('webserver/index-inject', (table) => {
-    table.push({ kind: 'global', name: CONFIG_GLOBAL, value: { ...current } })
+    table.push({ kind: 'global', name: CONFIG_GLOBAL, value: { ...readSource() } })
   })
 
   // Register the namespace. The settings service is part of the base web
   // bundle, so by the time any web profile loads this plugin the service is
   // already registered; `ctx.inject` waits for it.
   ctx.inject(['settings'], (settingsCtx) => {
-    settingsCtx.settings.installSection(ctx, SETTINGS_NAMESPACE, Config, current, {
+    settingsCtx.settings.installSection(ctx, SETTINGS_NAMESPACE, Config, config, {
       validate: assertServiceable,
-      setSource: (next) => {
-        current = next as Config
+      setSource: (read) => {
+        readSource = read
       },
       // Nothing is derived from the current config on the Node side, so no
       // onChange work is required; the next `webserver/index-inject` reads
