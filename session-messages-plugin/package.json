@@ -1,7 +1,7 @@
 {
-  "name": "dsh-session-history",
+  "name": "dsh-session-messages",
   "version": "0.1.0",
-  "description": "Session history viewer: a keyboard-driven overlay for jumping between past sessions.",
+  "description": "Session messages viewer: a keyboard-driven overlay for listing and jumping to messages within the current session.",
   "private": true,
   "type": "module",
   "license": "MIT",

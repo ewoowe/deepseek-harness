@@ -9,10 +9,19 @@
  * `config: false` is required — without it every call still probes for a
  * config file and re-enters the failing import.
  */
+import { fileURLToPath } from 'node:url'
 import { build } from 'tsdown'
 
 /** Plugin id stamped into the module-loader handoff. */
-const ID = 'dsh-session-history'
+const ID = 'dsh-session-messages'
+
+/**
+ * This script's own directory. Every path below is resolved against it rather
+ * than the caller's cwd, so the build works whether it is run from inside the
+ * plugin (`npm run build`) or from the repository root (`tsx session-messages-plugin/build.mjs`)
+ * — relying on cwd silently looked for `<repo>/src/index.ts` in the latter case.
+ */
+const ROOT = fileURLToPath(new URL('.', import.meta.url))
 
 /** Keep every bare specifier external: the module table answers them at runtime. */
 const externals = {
@@ -35,14 +44,14 @@ const common = {
   target: 'es2024',
   dts: false,
   clean: false,
-  outDir: 'lib',
+  outDir: `${ROOT}lib`,
   plugins: [externals],
 }
 
 // Node half: the Loader imports this by `main` for name, Config, and apply.
 await build({
   ...common,
-  entry: { index: 'src/index.ts' },
+  entry: { index: `${ROOT}src/index.ts` },
   platform: 'node',
   // Rolldown defaults the ESM output to .mjs; both halves are named from the
   // package.json exports map, so pin the extension instead of restating it.
@@ -56,7 +65,7 @@ await build({
 await build({
   ...common,
   format: ['cjs'],
-  entry: { client: 'src/client/index.ts' },
+  entry: { client: `${ROOT}src/client/index.ts` },
   platform: 'browser',
   outputOptions: {
     entryFileNames: 'client.js',
@@ -66,4 +75,4 @@ await build({
   },
 })
 
-console.log('history-plugin: built lib/index.js and lib/client.js')
+console.log('session-messages-plugin: built lib/index.js and lib/client.js')

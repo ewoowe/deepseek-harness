@@ -1,5 +1,5 @@
 /**
- * The in-session message-history overlay.
+ * The in-session session-messages overlay.
  *
  * Lists every user message of the CURRENT session and jumps the transcript to
  * the chosen one. Registered into the `shell.overlay` slot, so it stays mounted
@@ -14,8 +14,9 @@
  * - `[data-conversation-scroll]` — the scrollport (ChatView's own `scrollerOf`).
  * - `[data-chat-flow-kind="user"|"steering"]` — one human message row.
  *
- * Only the loaded window is listed. "Load earlier" pages history in through the
- * session face and rebuilds.
+ * Only the loaded window is listed. Earlier messages arrives without a manual
+ * control: opening fills the list to `maxRows`, and the prefetch pulls the next
+ * page in through the session face as the highlight nears the oldest loaded row.
  */
 import {
   useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore,
@@ -23,8 +24,11 @@ import {
 } from 'react'
 import { createPortal } from 'react-dom'
 import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
-import { CONFIG_GLOBAL, resolveConfig, type HistoryConfig } from '../shared.ts'
-import type { HistoryKey } from './locales.ts'
+import { CONFIG_GLOBAL, resolveConfig, type MessagesConfig } from '../shared.ts'
+import {
+  formatCompactDuration, formatCompactTokens, type SessionTotals,
+} from './session-totals.ts'
+import type { MessagesKey } from './locales.ts'
 import { readScope, subscribeScope } from './settings-scope-holder.ts'
 
 /** One listed message. */
@@ -35,29 +39,37 @@ export interface MessageEntry {
   readonly text: string
   /** Clock label rendered by ui-chat's IconActions (for example `21:36`); null when absent. */
   readonly timestamp: string | null
+  /** Usage pill label of this message's turn (for example `消费 1.2k`); null when the turn carries none. */
+  readonly usage: string | null
+  /** Duration pill label of this message's turn (for example `用时 12.3s`); null when the turn carries none. */
+  readonly duration: string | null
   /** Whether the row sat inside the transcript's scroll viewport when collected. */
   readonly visible: boolean
 }
 
 /** Props the slot hands the component: standard shares plus the inject face. */
-export interface HistoryOverlaySlotProps {
-  /** Injected: page one earlier history window in, if any remains. */
+export interface MessagesOverlaySlotProps {
+  /** Injected: page one earlier messages window in, if any remains. */
   loadOlder: () => Promise<void>
-  /** Injected: whether older history remains to page in. */
+  /** Injected: whether older messages remains to page in. */
   hasMore: () => boolean
+  /** Injected: the current session's totals, or null when its projections are absent. */
+  sessionTotals: () => SessionTotals | null
   /** Locale-bound translate function. */
-  t: Translate<HistoryKey>
+  t: Translate<MessagesKey>
 }
 
 interface OverlayProps {
   /** Resolved configuration. */
-  readonly config: HistoryConfig
-  /** Injected: page one earlier history window in. */
+  readonly config: MessagesConfig
+  /** Injected: page one earlier messages window in. */
   readonly loadOlder: () => Promise<void>
-  /** Injected: whether older history remains to page in. */
+  /** Injected: whether older messages remains to page in. */
   readonly hasMore: () => boolean
+  /** Injected: the current session's totals, or null when its projections are absent. */
+  readonly sessionTotals: () => SessionTotals | null
   /** Locale-bound translate function. */
-  readonly t: Translate<HistoryKey>
+  readonly t: Translate<MessagesKey>
 }
 
 /** Vertical breathing room above a landed row, matching ChatView's own jump. */
@@ -68,7 +80,7 @@ const MAX_PREVIEW_CHARS = 240
 
 /** DOM id of one row, the aria-activedescendant target. */
 function rowId(index: number): string {
-  return `dsh-history-row-${String(index)}`
+  return `dsh-messages-row-${String(index)}`
 }
 
 /**
@@ -127,6 +139,28 @@ function pageStep(listbox: HTMLDivElement | null): number {
   return Math.max(1, count - 1)
 }
 
+/**
+ * First rendered index of the listbox window, or 0 when the whole list fits.
+ *
+ * The list collects every loaded message, but renders at most `maxRows` rows.
+ * That window follows the highlight: anchoring it at index 0 hid every message
+ * newer than the cap, so a small `maxRows` could never reach the newest message,
+ * and a highlight past the cap addressed rows the DOM does not hold.
+ *
+ * Windows are page-aligned rather than centered on the highlight: consecutive
+ * pages then tile the list without a gap, and the rendered rows stay fixed while
+ * the reader moves inside one page — centering would rebuild the rows on every
+ * step and skip the row that falls between two centered windows.
+ * @param active - highlighted index into the full entry list.
+ * @param total - number of collected entries.
+ * @param maxRows - configured window size.
+ * @returns the first index to render, clamped so the last page meets the end.
+ */
+function windowStart(active: number, total: number, maxRows: number): number {
+  if (total <= maxRows) return 0
+  return Math.min(Math.floor(active / maxRows) * maxRows, total - maxRows)
+}
+
 /** Capture-phase document listener helper returning its disposer. */
 function onDocumentKeyDown(handler: (event: KeyboardEvent) => void): () => void {
   document.addEventListener('keydown', handler, true)
@@ -134,7 +168,7 @@ function onDocumentKeyDown(handler: (event: KeyboardEvent) => void): () => void 
 }
 
 /** Whether a keydown matches the configured chord exactly. */
-function matchesChord(event: KeyboardEvent, config: HistoryConfig): boolean {
+function matchesChord(event: KeyboardEvent, config: MessagesConfig): boolean {
   return event.key.toLowerCase() === config.key.toLowerCase()
     && event.ctrlKey === config.ctrl
     && event.altKey === config.alt
@@ -204,15 +238,23 @@ const FOLLOW_THRESHOLD_PX = 24
 const VISIBLE_MIN_PX = 30
 
 /**
+ * Wheel travel that moves the highlight one row. One notch of a notched mouse
+ * reports about 100 px, so a notch is exactly one row; a trackpad streams much
+ * smaller deltas and accumulates to the same step. Without the threshold a
+ * trackpad's event-per-pixel stream would run the highlight down the list.
+ */
+const WHEEL_STEP_PX = 100
+
+/**
  * How close to the oldest loaded row the highlight must get before older
- * history is paged in automatically. Generous enough that a page-sized jump
- * (≈14 rows) lands the reader with history already present.
+ * messages is paged in automatically. Generous enough that a page-sized jump
+ * (≈14 rows) lands the reader with messages already present.
  */
 const PREFETCH_AHEAD = 8
 
 /**
  * Consecutive pages that add no user message before a fill loop gives up.
- * A history page is 50 durable events, and a tool-heavy stretch can hold none
+ * A messages page is 50 durable events, and a tool-heavy stretch can hold none
  * of ours, so a single empty page is normal — three in a row is not.
  */
 const MAX_NO_PROGRESS = 3
@@ -226,11 +268,49 @@ interface Collected {
 }
 
 /**
+ * Read every rendered turn's usage and duration labels from its tail.
+ *
+ * The host owns both the numbers and their formatting: a turn's tail already
+ * carries a usage pill (`消费 1.2k` / `Consumed 1.2k`) and a duration pill
+ * (`用时 12.3s` / `Ran for 12.3s`), localized by ui-chat, so the overlay reuses
+ * those labels instead of deriving tokens or wall time itself. The pills are
+ * plain buttons with hashed class names, so they are located by contract
+ * position: `[data-turn-tail]` is the turn tail, and its LAST two
+ * `aria-haspopup="dialog"` buttons are exactly the usage panel and the time
+ * panel, in that order (TurnTailNodeView seats them after the branch action).
+ * Their icons tell them apart — the usage pill draws an ellipse, the time pill
+ * a circle. A pill hidden by the tail's hover-reveal keeps its text; opacity
+ * does not remove it from the DOM.
+ * @param scroller - the transcript scrollport.
+ * @returns one `{ usage, duration }` per turn, keyed by the turn's number.
+ */
+function collectTurnStats(scroller: HTMLElement): Map<string, { usage: string | null; duration: string | null }> {
+  const stats = new Map<string, { usage: string | null; duration: string | null }>()
+  for (const tail of scroller.querySelectorAll<HTMLElement>('[data-turn-tail]')) {
+    const turn = tail.dataset.turnTail
+    if (turn === undefined) continue
+    const pills = [...tail.querySelectorAll<HTMLElement>('button[aria-haspopup="dialog"]')].slice(-2)
+    let usage: string | null = null
+    let duration: string | null = null
+    for (const pill of pills) {
+      const label = (pill.textContent ?? '').trim()
+      // Both host labels always carry a number (a token count, a duration);
+      // an icon-only button from the assistant-actions slot carries none.
+      if (label === '' || !/\d/u.test(label)) continue
+      if (pill.querySelector('svg ellipse') !== null) usage = label
+      else if (pill.querySelector('svg circle') !== null) duration = label
+    }
+    if (usage !== null || duration !== null) stats.set(turn, { usage, duration })
+  }
+  return stats
+}
+
+/**
  * Collect the current session's human messages in transcript order, marking
  * each one with whether it sits inside the transcript's scroll viewport at
  * collection time. Also reports whether the transcript is pinned to the bottom,
  * which is what tells "the reader is on the newest message" apart from "the
- * reader is parked mid-history".
+ * reader is parked mid-list".
  * @returns the collected rows and the scroll state they were read under.
  */
 function collectMessages(): Collected {
@@ -239,6 +319,7 @@ function collectMessages(): Collected {
   const rows = scroller.querySelectorAll<HTMLElement>(
     '[data-chat-flow-kind="user"], [data-chat-flow-kind="steering"]',
   )
+  const turnStats = collectTurnStats(scroller)
   const view = scroller.getBoundingClientRect()
   const entries: MessageEntry[] = []
   for (const row of rows) {
@@ -246,6 +327,7 @@ function collectMessages(): Collected {
     const key = row.dataset.chatAnchorKey ?? row.dataset.chatFlowKey
     if (key === undefined) continue
     const { text, timestamp } = splitEntry(row)
+    const stats = turnStats.get(row.dataset.chatTurn ?? '')
     const box = row.getBoundingClientRect()
     // A row that only pokes a few pixels into the viewport is geometrically
     // inside it but the reader has not yet reached it — the previous message
@@ -258,6 +340,8 @@ function collectMessages(): Collected {
       id: key,
       text: text === '' ? '—' : text,
       timestamp,
+      usage: stats?.usage ?? null,
+      duration: stats?.duration ?? null,
       visible: visibleHeight >= VISIBLE_MIN_PX,
     })
   }
@@ -415,73 +499,64 @@ const DIALOG_CLOSE_STYLE: CSSProperties = {
 
 // --- Sub-components -------------------------------------------------------
 
-interface MetaRowProps {
+/**
+ * The header line above the list: the session's own totals, then how much
+ * messages the list holds.
+ *
+ * The totals are the whole session's, not the loaded window's: `用时` sums the
+ * model and tool wall time the `sessionStats` projection kept over the entire
+ * log, `用量` is billed input plus output from `tokenUsage`, and `缓存命中` is
+ * the cache-read share of that billed input. Any of them missing (no projection,
+ * no billed input yet) drops only its own clause.
+ */
+function ListHeader({ totals, count, t }: {
+  readonly totals: SessionTotals | null
   readonly count: number
-  readonly loading: boolean
-  /** False once the session's history is exhausted; the button then rests. */
-  readonly canLoadMore: boolean
-  readonly t: Translate<HistoryKey>
-  readonly onLoadOlder: () => void
-}
-
-function MetaRow({ count, loading, canLoadMore, t, onLoadOlder }: MetaRowProps): ReactNode {
-  // The button is the fallback, not the primary path: opening and paging both
-  // load on their own. It stays for the exhausted case and for a reader who
-  // simply prefers the pointer.
-  const disabled = loading || !canLoadMore
+  readonly t: Translate<MessagesKey>
+}): ReactNode {
   return (
-    <div style={META_ROW_STYLE}>
+    <div style={LIST_HEADER_STYLE}>
+      {totals !== null && (
+        <span style={SESSION_STATS_STYLE}>
+          {t('sessionTime', { duration: formatCompactDuration(totals.busyMs, t) })}
+          <span style={SEP_STYLE} aria-hidden="true">·</span>
+          {t('sessionUsage', { total: formatCompactTokens(totals.totalTokens, t) })}
+          {totals.cacheHitPercent !== null && (
+            <>
+              <span style={SEP_STYLE} aria-hidden="true">·</span>
+              {t('sessionCacheHit', { percent: String(totals.cacheHitPercent) })}
+            </>
+          )}
+        </span>
+      )}
       <span style={COUNT_STYLE}>
         {count === 0 ? t('empty') : t('count', { count })}
       </span>
-      <button
-        type="button"
-        onClick={onLoadOlder}
-        disabled={disabled}
-        style={LOAD_OLDER_STYLE(disabled)}
-        onMouseEnter={(event) => {
-          if (loading) return
-          event.currentTarget.style.background = 'var(--dsw-alias-interactive-bg-hover)'
-        }}
-        onMouseLeave={(event) => {
-          event.currentTarget.style.background = 'var(--dsw-alias-bg-fill-1)'
-        }}
-      >
-        {loading ? t('loading') : t('loadOlder')}
-      </button>
     </div>
   )
 }
 
-const META_ROW_STYLE: CSSProperties = {
+const LIST_HEADER_STYLE: CSSProperties = {
   display: 'flex',
-  alignItems: 'center',
+  alignItems: 'baseline',
   justifyContent: 'space-between',
   gap: 12,
 }
 
-const COUNT_STYLE: CSSProperties = {
+const SESSION_STATS_STYLE: CSSProperties = {
   fontSize: 12,
-  color: 'var(--dsw-alias-label-secondary)',
+  color: 'var(--dsw-alias-label-primary)',
 }
 
-function LOAD_OLDER_STYLE(loading: boolean): CSSProperties {
-  return {
-    display: 'inline-flex',
-    alignItems: 'center',
-    height: 28,
-    padding: '0 12px',
-    border: 'none',
-    borderRadius: 8,
-    background: 'var(--dsw-alias-bg-fill-1)',
-    color: 'var(--dsw-alias-label-primary)',
-    font: 'inherit',
-    fontSize: 12,
-    lineHeight: '20px',
-    cursor: loading ? 'default' : 'pointer',
-    opacity: loading ? 0.6 : 1,
-    transition: 'background 80ms ease',
-  }
+const SEP_STYLE: CSSProperties = {
+  margin: '0 4px',
+  color: 'var(--dsw-alias-label-tertiary)',
+}
+
+const COUNT_STYLE: CSSProperties = {
+  flex: 'none',
+  fontSize: 12,
+  color: 'var(--dsw-alias-label-secondary)',
 }
 
 interface MessageRowProps {
@@ -494,6 +569,7 @@ interface MessageRowProps {
 }
 
 function MessageRow({ entry, index, active, onActivate, onJump, rowIdStr }: MessageRowProps): ReactNode {
+  const hasStats = entry.usage !== null || entry.duration !== null
   return (
     <button
       type="button"
@@ -506,6 +582,12 @@ function MessageRow({ entry, index, active, onActivate, onJump, rowIdStr }: Mess
     >
       <span style={INDEX_STYLE}>{index + 1}</span>
       <span style={TEXT_STYLE}>{entry.text.slice(0, MAX_PREVIEW_CHARS)}</span>
+      {hasStats && (
+        <span style={STATS_STYLE}>
+          {entry.usage !== null && <span>{entry.usage}</span>}
+          {entry.duration !== null && <span>{entry.duration}</span>}
+        </span>
+      )}
       {entry.timestamp !== null && <span style={TIME_STYLE}>{entry.timestamp}</span>}
     </button>
   )
@@ -564,6 +646,24 @@ const TIME_STYLE: CSSProperties = {
 }
 
 /**
+ * The turn's usage and duration, one per line, in the same meta tier as the
+ * clock: read as a caption beside the message rather than as its content.
+ */
+const STATS_STYLE: CSSProperties = {
+  flex: 'none',
+  display: 'flex',
+  flexDirection: 'column',
+  alignItems: 'flex-end',
+  gap: 1,
+  paddingTop: 3,
+  fontSize: 11,
+  lineHeight: '15px',
+  fontVariantNumeric: 'tabular-nums',
+  color: 'var(--dsw-alias-label-tertiary)',
+  whiteSpace: 'nowrap',
+}
+
+/**
  * Label for the paging modifier key: Apple keyboards print `Option` (⌥) where
  * others print `Alt`. Display-only — the handler reads `event.altKey`, which is
  * the same physical key on every platform.
@@ -571,15 +671,24 @@ const TIME_STYLE: CSSProperties = {
 const PAGING_MODIFIER_LABEL = /Mac|iPhone|iPad|iPod/.test(navigator.userAgent) ? '⌥' : 'Alt'
 
 interface HintBarProps {
-  readonly t: Translate<HistoryKey>
+  readonly t: Translate<MessagesKey>
+  /**
+   * Configured wheel direction. The hint names the mapping the reader actually
+   * has, so a changed setting is visible in the bar instead of only in how the
+   * list reacts at its ends.
+   */
+  readonly wheelInverted: boolean
 }
 
-function HintBar({ t }: HintBarProps): ReactNode {
+function HintBar({ t, wheelInverted }: HintBarProps): ReactNode {
   return (
     <div style={HINT_STYLE}>
       <Kbd>↑</Kbd>
       <Kbd>↓</Kbd>
       <span style={HINT_TEXT_STYLE}>{t('hintPick')}</span>
+      <span style={HINT_GAP_STYLE} aria-hidden="true" />
+      <WheelGlyph />
+      <span style={HINT_TEXT_STYLE}>{t(wheelInverted ? 'hintWheelDown' : 'hintWheelUp')}</span>
       <span style={HINT_GAP_STYLE} aria-hidden="true" />
       <Kbd>{PAGING_MODIFIER_LABEL}</Kbd>
       <Kbd>↑</Kbd>
@@ -597,6 +706,22 @@ function HintBar({ t }: HintBarProps): ReactNode {
 
 function Kbd({ children }: { readonly children: ReactNode }): ReactNode {
   return <kbd style={KBD_STYLE}>{children}</kbd>
+}
+
+/**
+ * Mouse glyph for the wheel hint. `Kbd` labels keyboard keys and the wheel has
+ * no key, so it gets its own glyph in the same capsule chrome: a mouse body
+ * with the scroll wheel drawn on it.
+ */
+function WheelGlyph(): ReactNode {
+  return (
+    <kbd style={KBD_STYLE} aria-hidden="true">
+      <svg width="11" height="15" viewBox="0 0 12 16" fill="none">
+        <rect x="0.75" y="0.75" width="10.5" height="14.5" rx="5.25" stroke="currentColor" strokeWidth="1.25" />
+        <path d="M6 4.25V6.75" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" />
+      </svg>
+    </kbd>
+  )
 }
 
 const HINT_STYLE: CSSProperties = {
@@ -642,13 +767,14 @@ const KBD_STYLE: CSSProperties = {
  * @param props - the inject face and copy.
  * @returns the overlay tree.
  */
-export function HistoryOverlaySlot({ loadOlder, hasMore, t }: HistoryOverlaySlotProps): ReactNode {
-  const config = useHistoryConfig()
+export function MessagesOverlaySlot({ loadOlder, hasMore, sessionTotals, t }: MessagesOverlaySlotProps): ReactNode {
+  const config = useMessagesConfig()
   return (
-    <HistoryOverlay
+    <MessagesOverlay
       config={config}
       loadOlder={loadOlder}
       hasMore={hasMore}
+      sessionTotals={sessionTotals}
       t={t}
     />
   )
@@ -664,7 +790,7 @@ export function HistoryOverlaySlot({ loadOlder, hasMore, t }: HistoryOverlaySlot
  * soon as the service appears, and a host with no settings service keeps the
  * composed value the Node half published.
  */
-function useHistoryConfig(): HistoryConfig {
+function useMessagesConfig(): MessagesConfig {
   const scope = useSyncExternalStore(subscribeScope, readScope, readScope)
   const subscribe = useCallback(
     (listener: () => void) => (scope === undefined ? () => {} : scope.subscribe(listener)),
@@ -688,12 +814,11 @@ function useHistoryConfig(): HistoryConfig {
  * @param props - configuration, the paging actions, and copy.
  * @returns the overlay tree.
  */
-export function HistoryOverlay({ config, loadOlder, hasMore, t }: OverlayProps) {
+export function MessagesOverlay({ config, loadOlder, hasMore, sessionTotals, t }: OverlayProps) {
   const [open, setOpen] = useState(false)
   const [entries, setEntries] = useState<readonly MessageEntry[]>([])
-  const [loading, setLoading] = useState(false)
   /**
-   * The highlight is tracked by row id, not index. Paging older history
+   * The highlight is tracked by row id, not index. Paging older messages
    * PREPENDS rows, which would silently slide an index-based highlight onto a
    * different message; the id survives, so the reader keeps their place and the
    * prefetch below self-limits (their index grows by the rows added).
@@ -706,6 +831,13 @@ export function HistoryOverlay({ config, loadOlder, hasMore, t }: OverlayProps) 
   const entriesRef = useRef<readonly MessageEntry[]>([])
   /** Serializes loads so an effect-driven prefetch cannot race a manual one. */
   const loadingRef = useRef(false)
+  /**
+   * The session's totals for the header. Re-read with every collect pass (open,
+   * and each page the fill pulls in) rather than subscribed: the list itself is
+   * a snapshot rebuilt the same way, and a settling turn moves these numbers no
+   * more often than it moves the rows.
+   */
+  const [totals, setTotals] = useState<SessionTotals | null>(null)
 
   const active = useMemo(() => {
     if (activeId === null) return Math.max(0, entries.length - 1)
@@ -722,7 +854,7 @@ export function HistoryOverlay({ config, loadOlder, hasMore, t }: OverlayProps) 
    * this once per page, and the auto-fill effect re-runs on every new `entries`
    * reference. Without it, a page that adds no message would still produce a
    * fresh array, which would retrigger the effect, which would run another
-   * fill — an unbounded loop on any session whose history is not yet exhausted.
+   * fill — an unbounded loop on any session whose messages is not yet exhausted.
    * Identity is by id: `visible` only matters at open time, which recollects.
    */
   const applyEntries = useCallback((next: readonly MessageEntry[]) => {
@@ -732,6 +864,9 @@ export function HistoryOverlay({ config, loadOlder, hasMore, t }: OverlayProps) 
     entriesRef.current = next
     if (!same) setEntries(next)
   }, [])
+
+  /** Re-read the session totals the header shows; null when the host serves no projections. */
+  const syncTotals = useCallback(() => { setTotals(sessionTotals()) }, [sessionTotals])
 
   const setActiveAt = useCallback((index: number) => {
     const clamped = Math.max(0, Math.min(index, entries.length - 1))
@@ -744,16 +879,17 @@ export function HistoryOverlay({ config, loadOlder, hasMore, t }: OverlayProps) 
   // Where to land depends on where the reader is. Pinned to the bottom — the
   // state a freshly opened session follows itself into — they are on the newest
   // message, so highlight the last row; taking the first visible row there would
-  // drop them at the top of a short transcript. Parked mid-history, they are
+  // drop them at the top of a short transcript. Parked mid-list, they are
   // reading from the top edge of their viewport downward, so the first visible
   // row is the one to start from.
   const refresh = useCallback(() => {
     const { entries: next, pinnedToBottom } = collectMessages()
     applyEntries(next)
+    syncTotals()
     const firstVisible = next.findIndex(entry => entry.visible)
     const target = pinnedToBottom ? Math.max(0, next.length - 1) : Math.max(0, firstVisible)
     setActiveId(next[target]?.id ?? null)
-  }, [applyEntries])
+  }, [applyEntries, syncTotals])
 
   /**
    * Wait for the transcript to commit the rows a prepend just produced.
@@ -765,19 +901,18 @@ export function HistoryOverlay({ config, loadOlder, hasMore, t }: OverlayProps) 
   }), [])
 
   /**
-   * Page older history in until the list holds `minRows` entries.
+   * Page older messages in until the list holds `minRows` entries.
    *
    * Pass `current + 1` to request exactly one more page — the loop condition is
    * a strict "fewer than", so once a page lands the target is already met.
    *
-   * Two exits besides meeting the target: `hasMore()` going false (history
+   * Two exits besides meeting the target: `hasMore()` going false (messages
    * exhausted), and {@link MAX_NO_PROGRESS} consecutive pages that add no row
    * (a tool-heavy stretch with none of our messages, or a broken page).
    */
   const fill = useCallback(async (minRows: number): Promise<void> => {
     if (loadingRef.current) return
     loadingRef.current = true
-    setLoading(true)
     try {
       let stalled = 0
       while (entriesRef.current.length < minRows && hasMore() && stalled < MAX_NO_PROGRESS) {
@@ -786,13 +921,13 @@ export function HistoryOverlay({ config, loadOlder, hasMore, t }: OverlayProps) 
         await settle()
         const next = collectMessages().entries
         applyEntries(next)
+        syncTotals()
         stalled = next.length > before ? 0 : stalled + 1
       }
     } finally {
       loadingRef.current = false
-      setLoading(false)
     }
-  }, [applyEntries, hasMore, loadOlder, settle])
+  }, [applyEntries, hasMore, loadOlder, settle, syncTotals])
 
   // The chord: always armed, toggles the overlay, and suppresses the browser's
   // own binding (Ctrl+S is "save page" in every major browser). Pure toggle —
@@ -909,11 +1044,58 @@ export function HistoryOverlay({ config, loadOlder, hasMore, t }: OverlayProps) 
     })
   }, [open, entries, active])
 
+  // Wheel over the list moves the highlight, one row per notch, exactly as
+  // ArrowUp/ArrowDown do: the reader picks with the wheel and the list follows.
+  // A native, non-passive listener is required — React registers `onWheel`
+  // passively at the root, so `preventDefault` there could not stop the
+  // listbox's own scroll, and a notched wheel would move the highlight and
+  // scroll the rows at the same time. Reaching either end behaves like the
+  // keyboard: the highlight clamps, and the prefetch above pulls in the older
+  // page so a continued scroll keeps moving.
+  useEffect(() => {
+    if (!open) return undefined
+    const listbox = listboxRef.current
+    if (listbox === null || entries.length === 0) return undefined
+    let travel = 0
+    const step = (direction: 1 | -1): void => {
+      setActiveId((current) => {
+        const found = current === null ? -1 : entries.findIndex(entry => entry.id === current)
+        const from = found < 0 ? entries.length - 1 : found
+        const to = Math.max(0, Math.min(from + direction, entries.length - 1))
+        return entries[to]?.id ?? null
+      })
+    }
+    const onWheel = (event: WheelEvent): void => {
+      if (event.deltaY === 0) return
+      event.preventDefault()
+      // Line- and page-mode deltas normalize to pixels, so one threshold means
+      // one row whatever unit the device reports in.
+      const delta = event.deltaMode === 1
+        ? event.deltaY * 16
+        : event.deltaMode === 2
+          ? event.deltaY * listbox.clientHeight
+          : event.deltaY
+      travel += delta
+      while (Math.abs(travel) >= WHEEL_STEP_PX) {
+        const scrollingDown = travel > 0
+        travel -= (scrollingDown ? 1 : -1) * WHEEL_STEP_PX
+        // Direct by default — down scrolls to the newer row below — and
+        // reversed for a device whose deltas read the other way.
+        const direction: 1 | -1 = scrollingDown
+          ? (config.wheelInverted ? -1 : 1)
+          : (config.wheelInverted ? 1 : -1)
+        step(direction)
+      }
+    }
+    listbox.addEventListener('wheel', onWheel, { passive: false })
+    return () => { listbox.removeEventListener('wheel', onWheel) }
+  }, [open, entries, config.wheelInverted])
+
   // A shrinking list must never leave the highlight past its end.
   // Keep the highlight inside the listbox window for every path that moves it:
   // opening (the highlight is the first row visible in the transcript, which in
   // a long session sits far below the list window), Arrow navigation (which
-  // pushes it past either edge), and paging in older history (which rebuilds
+  // pushes it past either edge), and paging in older messages (which rebuilds
   // the list around a new first-visible row). Mouse hover moves `active` too,
   // but that row is already under the pointer, so the overflow test no-ops.
   useEffect(() => {
@@ -927,24 +1109,17 @@ export function HistoryOverlay({ config, loadOlder, hasMore, t }: OverlayProps) 
     setOpen(false)
   }
 
-  // Manual load: one more page. Shares `fill` so it cannot race the automatic
-  // paths, and keeps the highlight by id rather than resetting it the way
-  // `refresh` does on open.
-  const pageOlder = async (): Promise<void> => {
-    await fill(entries.length + 1)
-  }
-
   if (!open) return null
+
+  // Which slice of the collected list the listbox renders. Row ids, the
+  // `active` comparison, and every measurement below stay indexed against the
+  // FULL list, so the highlight still addresses its own row once the window
+  // slides away from index 0.
+  const start = windowStart(active, entries.length, config.maxRows)
 
   return (
     <Dialog title={t('title')} closeLabel={t('closeLabel')} onClose={close}>
-      <MetaRow
-        count={entries.length}
-        loading={loading}
-        canLoadMore={hasMore()}
-        t={t}
-        onLoadOlder={() => { void pageOlder() }}
-      />
+      <ListHeader totals={totals} count={entries.length} t={t} />
       {entries.length > 0 && (
         <div
           ref={listboxRef}
@@ -953,20 +1128,23 @@ export function HistoryOverlay({ config, loadOlder, hasMore, t }: OverlayProps) 
           aria-activedescendant={rowId(active)}
           style={LIST_STYLE}
         >
-          {entries.slice(0, config.maxRows).map((entry, index) => (
-            <MessageRow
-              key={entry.id}
-              entry={entry}
-              index={index}
-              active={index === active}
-              onActivate={() => { setActiveAt(index) }}
-              onJump={() => { jumpTo(entry.id) }}
-              rowIdStr={rowId(index)}
-            />
-          ))}
+          {entries.slice(start, start + config.maxRows).map((entry, offset) => {
+            const index = start + offset
+            return (
+              <MessageRow
+                key={entry.id}
+                entry={entry}
+                index={index}
+                active={index === active}
+                onActivate={() => { setActiveAt(index) }}
+                onJump={() => { jumpTo(entry.id) }}
+                rowIdStr={rowId(index)}
+              />
+            )
+          })}
         </div>
       )}
-      <HintBar t={t} />
+      <HintBar t={t} wheelInverted={config.wheelInverted} />
     </Dialog>
   )
 }

@@ -8,8 +8,8 @@
  * browser bundling its own copy of the Schema.
  */
 
-/** One resolved session-history configuration. */
-export interface HistoryConfig {
+/** One resolved session-messages configuration. */
+export interface MessagesConfig {
   /** `KeyboardEvent.key` in lowercase that opens the overlay (for example `s`). */
   key: string
   /** Whether the Control modifier must be held. */
@@ -20,36 +20,43 @@ export interface HistoryConfig {
   shift: boolean
   /** Whether the Meta modifier (Cmd on macOS, Win on Windows) must be held. */
   meta: boolean
+  /**
+   * Whether scrolling up moves the highlight down. Off (the default) reads the
+   * wheel as direct movement: up scrolls to the older row above, down to the
+   * newer row below. On suits a reader whose device reports inverted deltas.
+   */
+  wheelInverted: boolean
   /** Maximum number of rows rendered in the overlay. */
   maxRows: number
 }
 
 /** Defaults every consumer falls back to; they mirror the Schema defaults. */
-export const DEFAULT_CONFIG: HistoryConfig = {
+export const DEFAULT_CONFIG: MessagesConfig = {
   key: 's',
   ctrl: true,
   alt: false,
   shift: false,
   meta: false,
+  wheelInverted: false,
   maxRows: 50,
 }
 
 /** `globalThis` property the Node half writes the resolved configuration to. */
-export const CONFIG_GLOBAL = '__DSH_SESSION_HISTORY_CONFIG__'
+export const CONFIG_GLOBAL = '__DSH_SESSION_MESSAGES_CONFIG__'
 
 /**
  * Fill every missing field from {@link DEFAULT_CONFIG}.
  * @param value - raw value read from the page, untrusted shape.
  * @returns a complete configuration.
  */
-export function resolveConfig(value: unknown): HistoryConfig {
+export function resolveConfig(value: unknown): MessagesConfig {
   if (typeof value !== 'object' || value === null) return DEFAULT_CONFIG
   const raw = value as Record<string, unknown>
-  const text = (field: keyof HistoryConfig): string | undefined =>
+  const text = (field: keyof MessagesConfig): string | undefined =>
     typeof raw[field] === 'string' ? raw[field] as string : undefined
-  const flag = (field: keyof HistoryConfig): boolean | undefined =>
+  const flag = (field: keyof MessagesConfig): boolean | undefined =>
     typeof raw[field] === 'boolean' ? raw[field] as boolean : undefined
-  const count = (field: keyof HistoryConfig): number | undefined =>
+  const count = (field: keyof MessagesConfig): number | undefined =>
     typeof raw[field] === 'number' && Number.isFinite(raw[field]) ? raw[field] as number : undefined
   return {
     key: text('key') ?? DEFAULT_CONFIG.key,
@@ -57,6 +64,7 @@ export function resolveConfig(value: unknown): HistoryConfig {
     alt: flag('alt') ?? DEFAULT_CONFIG.alt,
     shift: flag('shift') ?? DEFAULT_CONFIG.shift,
     meta: flag('meta') ?? DEFAULT_CONFIG.meta,
+    wheelInverted: flag('wheelInverted') ?? DEFAULT_CONFIG.wheelInverted,
     maxRows: count('maxRows') ?? DEFAULT_CONFIG.maxRows,
   }
 }

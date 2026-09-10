@@ -1,11 +1,11 @@
 /**
- * Node half of the session-history plugin.
+ * Node half of the session-messages plugin.
  *
  * The Loader imports this file by `main`. It owns the configuration Schema, so
  * a malformed `cordis.patch.yml` fails the plugin load loudly, publishes the
  * initial composition value into the page as a global for the browser half's
  * bootstrap fallback, and registers the configuration under the
- * `session-history` settings namespace so the Settings → Plugins → Plugin
+ * `session-messages` settings namespace so the Settings → Plugins → Plugin
  * configuration page can read and write it.
  */
 import type { Context } from '@deepseek-ai/cordis'
@@ -14,25 +14,26 @@ import Schema from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 // Type-only merge: pulls in the 'settings' service registration (installSection).
 import type {} from '@deepseek-ai/dsh-settings'
-import { CONFIG_GLOBAL, DEFAULT_CONFIG, type HistoryConfig } from './shared.ts'
+import { CONFIG_GLOBAL, DEFAULT_CONFIG, type MessagesConfig } from './shared.ts'
 
-export const name = 'session-history'
+export const name = 'session-messages'
 
-/** Session-history plugin configuration. */
-export interface Config extends HistoryConfig {}
+/** Session-messages plugin configuration. */
+export interface Config extends MessagesConfig {}
 
-/** Validated session-history configuration. */
+/** Validated session-messages configuration. */
 export const Config: Schema<Config> = Schema.object({
   key: Schema.string().default(DEFAULT_CONFIG.key),
   ctrl: Schema.boolean().default(DEFAULT_CONFIG.ctrl),
   alt: Schema.boolean().default(DEFAULT_CONFIG.alt),
   shift: Schema.boolean().default(DEFAULT_CONFIG.shift),
   meta: Schema.boolean().default(DEFAULT_CONFIG.meta),
+  wheelInverted: Schema.boolean().default(DEFAULT_CONFIG.wheelInverted),
   maxRows: Schema.number().default(DEFAULT_CONFIG.maxRows),
 })
 
 /** Settings namespace owned by this plugin. */
-export const SETTINGS_NAMESPACE = 'session-history'
+export const SETTINGS_NAMESPACE = 'session-messages'
 
 /**
  * Refuse a value the schema accepts but the chord matcher would misfire on.
@@ -46,10 +47,10 @@ export const SETTINGS_NAMESPACE = 'session-history'
 function assertServiceable(config: Config): void {
   const key = config.key
   if (key.length !== 1) {
-    throw new Error(`session-history: key must be exactly one character (got "${key}")`)
+    throw new Error(`session-messages: key must be exactly one character (got "${key}")`)
   }
   if (config.maxRows <= 0 || !Number.isInteger(config.maxRows)) {
-    throw new Error(`session-history: maxRows must be a positive integer (got ${String(config.maxRows)})`)
+    throw new Error(`session-messages: maxRows must be a positive integer (got ${String(config.maxRows)})`)
   }
 }
 
