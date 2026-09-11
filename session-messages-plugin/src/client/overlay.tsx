@@ -20,7 +20,7 @@
  */
 import {
   useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState,
-  type CSSProperties, type ReactNode,
+  type CSSProperties, type MutableRefObject, type ReactNode,
 } from 'react'
 import { createPortal } from 'react-dom'
 import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
@@ -32,6 +32,9 @@ import type { MessagesKey } from './locales.ts'
 import {
   collectTurnStats, LAND_OFFSET_PX, MESSAGE_ROW_SELECTOR, scrollport, splitEntry, VISIBLE_MIN_PX,
 } from './transcript.ts'
+import {
+  highlight, isBlankQuery, matchesEntry, matchRanges, nfc, type MatchRange,
+} from './search.ts'
 import { useMessagesConfig } from './use-messages-config.ts'
 
 /** One listed message. */
@@ -320,20 +323,31 @@ function Dialog({ title, closeLabel, onClose, children }: DialogProps): ReactNod
               event.currentTarget.style.background = 'transparent'
             }}
           >
-            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
-              <path
-                d="M3.5 3.5L10.5 10.5M10.5 3.5L3.5 10.5"
-                stroke="currentColor"
-                strokeWidth="1.4"
-                strokeLinecap="round"
-              />
-            </svg>
+            <CrossGlyph />
           </button>
         </div>
         {children}
       </div>
     </div>
   ), document.body)
+}
+
+/**
+ * The cross the host draws for "dismiss", shared by the dialog's close button and
+ * the search field's clear button: two spellings of one gesture inside a single
+ * card would read as two different actions.
+ */
+function CrossGlyph(): ReactNode {
+  return (
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+      <path
+        d="M3.5 3.5L10.5 10.5M10.5 3.5L3.5 10.5"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+      />
+    </svg>
+  )
 }
 
 const DIALOG_ROOT_STYLE: CSSProperties = {
@@ -421,10 +435,17 @@ const DIALOG_CLOSE_STYLE: CSSProperties = {
  * log, `用量` is billed input plus output from `tokenUsage`, and `缓存命中` is
  * the cache-read share of that billed input. Any of them missing (no projection,
  * no billed input yet) drops only its own clause.
+ *
+ * The count beside them reports the search when one is running: how many of the
+ * loaded messages matched, out of how many were searched. Stating both is the
+ * point — the corpus is the loaded window, not the log, so a bare match count
+ * would read as an answer about the whole session.
  */
-function ListHeader({ totals, count, t }: {
+function ListHeader({ totals, count, matches, t }: {
   readonly totals: SessionTotals | null
   readonly count: number
+  /** Matching messages, or null when no search is running. */
+  readonly matches: number | null
   readonly t: Translate<MessagesKey>
 }): ReactNode {
   return (
@@ -443,7 +464,11 @@ function ListHeader({ totals, count, t }: {
         </span>
       )}
       <span style={COUNT_STYLE}>
-        {count === 0 ? t('empty') : t('count', { count })}
+        {count === 0
+          ? t('empty')
+          : matches === null
+            ? t('count', { count })
+            : t('searchCount', { matches, count })}
       </span>
     </div>
   )
@@ -481,6 +506,139 @@ const COUNT_STYLE: CSSProperties = {
   color: 'var(--dsw-alias-label-secondary)',
 }
 
+/**
+ * The search row: the box, its submit button, and a clear affordance.
+ *
+ * Submitting is explicit — Enter in the box, or the button — rather than
+ * filtering as the reader types. The corpus is the DOM the overlay collected, and
+ * a collection pass clones rows; putting that on every keystroke would cost real
+ * work to produce a list that moves under the reader's hands.
+ *
+ * The button carries the emphasis while the box no longer matches what the list
+ * shows, so "typed but not searched" is visible without a status line of its own.
+ */
+function SearchRow({ query, inputRef, dirty, onChange, onSubmit, onClear, t }: {
+  readonly query: string
+  readonly inputRef: MutableRefObject<HTMLInputElement | null>
+  readonly dirty: boolean
+  readonly onChange: (value: string) => void
+  readonly onSubmit: () => void
+  readonly onClear: () => void
+  readonly t: Translate<MessagesKey>
+}): ReactNode {
+  const blank = isBlankQuery(query)
+  return (
+    <div style={SEARCH_ROW_STYLE}>
+      <input
+        ref={inputRef}
+        type="text"
+        value={query}
+        placeholder={t('searchPlaceholder')}
+        aria-label={t('searchPlaceholder')}
+        onChange={(event) => { onChange(event.target.value) }}
+        style={SEARCH_INPUT_STYLE}
+      />
+      {/* Also offered when the box was emptied by hand while a filter is still in
+          force (`dirty` with an empty box), so the mouse keeps a way out. */}
+      {(query !== '' || dirty) && (
+        <button type="button" aria-label={t('searchClear')} onClick={onClear} style={SEARCH_CLEAR_STYLE}>
+          <CrossGlyph />
+        </button>
+      )}
+      <button
+        type="button"
+        disabled={blank}
+        onClick={onSubmit}
+        style={SEARCH_BUTTON_STYLE(dirty, blank)}
+      >
+        {t('searchAction')}
+      </button>
+    </div>
+  )
+}
+
+const SEARCH_ROW_STYLE: CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 8,
+  marginTop: 12,
+}
+
+/**
+ * The input is the only part that takes width, and it may shrink: a language
+ * whose "Search" button is long must not push the row out of the card — the same
+ * rule the header's count follows.
+ *
+ * `outline` is deliberately NOT suppressed. Focus has to stay visible, and the
+ * browser's own ring is the only one that reliably differs between the light and
+ * dark themes this card inherits.
+ */
+const SEARCH_INPUT_STYLE: CSSProperties = {
+  flex: 1,
+  minWidth: 0,
+  height: 28,
+  padding: '0 10px',
+  border: '0.5px solid var(--dsw-alias-border-l2)',
+  borderRadius: 8,
+  background: 'var(--dsw-alias-bg-layer-1)',
+  color: 'var(--dsw-alias-label-primary)',
+  font: 'inherit',
+  fontSize: 13,
+}
+
+const SEARCH_CLEAR_STYLE: CSSProperties = {
+  flex: 'none',
+  display: 'inline-flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  width: 24,
+  height: 24,
+  border: 'none',
+  borderRadius: 6,
+  background: 'transparent',
+  color: 'var(--dsw-alias-label-tertiary)',
+  cursor: 'pointer',
+}
+
+/**
+ * The emphasis is the same inversion the settings card gives its primary button
+ * (`label-primary` fill, card-coloured text), so "there is something to submit"
+ * reads the same way on both surfaces of this plugin.
+ */
+function SEARCH_BUTTON_STYLE(dirty: boolean, disabled: boolean): CSSProperties {
+  return {
+    flex: 'none',
+    height: 28,
+    padding: '0 12px',
+    border: dirty ? '1px solid transparent' : '0.5px solid var(--dsw-alias-border-l2)',
+    borderRadius: 8,
+    background: dirty ? 'var(--dsw-alias-label-primary)' : 'transparent',
+    color: dirty
+      ? 'var(--dsw-alias-bg-layer-2)'
+      : disabled
+        ? 'var(--dsw-alias-label-dimmed)'
+        : 'var(--dsw-alias-label-secondary)',
+    font: 'inherit',
+    fontSize: 13,
+    cursor: disabled ? 'default' : 'pointer',
+  }
+}
+
+/** Shown in the listbox's place when a search matched nothing. */
+const NO_MATCH_STYLE: CSSProperties = {
+  padding: '24px 0',
+  textAlign: 'center',
+  fontSize: 12,
+  color: 'var(--dsw-alias-label-tertiary)',
+}
+
+/** Its second line: dimmer, because it is the advice rather than the finding. */
+const NO_MATCH_HINT_STYLE: CSSProperties = {
+  marginTop: 6,
+  fontSize: 11,
+  color: 'var(--dsw-alias-label-dimmed)',
+}
+
 interface MessageRowProps {
   readonly entry: MessageEntry
   readonly index: number
@@ -488,11 +646,25 @@ interface MessageRowProps {
   readonly onActivate: () => void
   readonly onJump: () => void
   readonly rowIdStr: string
+  /** The submitted query, for highlighting; blank when no search is running. */
+  readonly query: string
   readonly t: Translate<MessagesKey>
 }
 
-function MessageRow({ entry, index, active, onActivate, onJump, rowIdStr, t }: MessageRowProps): ReactNode {
+function MessageRow({ entry, index, active, onActivate, onJump, rowIdStr, query, t }: MessageRowProps): ReactNode {
   const hasStats = entry.usage !== null || entry.duration !== null
+  // Memoised per row: an arrow key re-renders the whole window, and this is the
+  // only costly part of a row — it folds and scans the entire message.
+  const body = useMemo(
+    () => highlight(entry.text, query, MAX_PREVIEW_CHARS),
+    [entry.text, query],
+  )
+  const clock = useMemo(
+    () => (entry.timestamp === null
+      ? null
+      : { text: nfc(entry.timestamp), ranges: matchRanges(entry.timestamp, query) }),
+    [entry.timestamp, query],
+  )
   return (
     <button
       type="button"
@@ -504,7 +676,7 @@ function MessageRow({ entry, index, active, onActivate, onJump, rowIdStr, t }: M
       style={ROW_STYLE(active)}
     >
       <span style={INDEX_STYLE}>{index + 1}</span>
-      <span style={TEXT_STYLE}>{entry.text.slice(0, MAX_PREVIEW_CHARS)}</span>
+      <span style={TEXT_STYLE}><Marked text={body.text} ranges={body.ranges} /></span>
       {hasStats && (
         // Labelled here rather than printed as scraped: the host's own pill label
         // is English under any language-pack locale (the shell ships zh and en),
@@ -515,9 +687,62 @@ function MessageRow({ entry, index, active, onActivate, onJump, rowIdStr, t }: M
           {entry.duration !== null && <span>{t('turnDuration', { value: entry.duration })}</span>}
         </span>
       )}
-      {entry.timestamp !== null && <span style={TIME_STYLE}>{entry.timestamp}</span>}
+      {clock !== null && (
+        <span style={TIME_STYLE}><Marked text={clock.text} ranges={clock.ranges} /></span>
+      )}
     </button>
   )
+}
+
+/**
+ * Text with its matched runs emphasised.
+ *
+ * Split into runs rather than wrapped whole: only the hit is emphasised, and one
+ * row can hold several. The emphasis is a fill AND a weight, because the row's
+ * own highlight state also draws a fill — one cue alone would disappear in one of
+ * the two states, and the active row is the one the reader is looking at.
+ */
+function Marked({ text, ranges }: {
+  readonly text: string
+  readonly ranges: readonly MatchRange[]
+}): ReactNode {
+  if (ranges.length === 0) return text
+  const parts: ReactNode[] = []
+  let at = 0
+  for (const range of ranges) {
+    if (range.start > at) parts.push(text.slice(at, range.start))
+    parts.push(<span key={range.start} style={MARK_STYLE}>{text.slice(range.start, range.end)}</span>)
+    at = range.end
+  }
+  if (at < text.length) parts.push(text.slice(at))
+  return parts
+}
+
+/**
+ * A mark has to be unmistakable, which rules out two otherwise reasonable tokens.
+ *
+ * `interactive-bg-hover` is what the row uses for its own highlight state, so the
+ * mark would cancel out exactly on the row the reader is looking at. And a
+ * neutral surface (`markdown-tag`, the first attempt) is a shade of the card
+ * itself — close enough in the light theme to read as "this row happens to be
+ * tinted", which is what "the hit is not visible" looked like in practice.
+ *
+ * `bubble-highlight` is the host's token for a surface UNDER text, so the run
+ * reads as a mark on the message rather than as a chip beside it, and it is
+ * saturated in both themes. `label-primary` keeps the text at full contrast
+ * rather than letting the fill dim it.
+ *
+ * The padding and the matching negative margin are the standard pair: the fill
+ * gets breathing room at each end without the run measuring wider, so a search
+ * never rewraps a line on its own.
+ */
+const MARK_STYLE: CSSProperties = {
+  background: 'var(--dsw-specific-bubble-highlight)',
+  color: 'var(--dsw-alias-label-primary)',
+  fontWeight: 600,
+  borderRadius: 3,
+  padding: '0 1px',
+  margin: '0 -1px',
 }
 
 function ROW_STYLE(active: boolean): CSSProperties {
@@ -624,6 +849,9 @@ function HintBar({ t, wheelInverted }: HintBarProps): ReactNode {
       <span style={HINT_GAP_STYLE} aria-hidden="true" />
       <Kbd>↵</Kbd>
       <span style={HINT_TEXT_STYLE}>{t('hintJump')}</span>
+      <span style={HINT_GAP_STYLE} aria-hidden="true" />
+      <Kbd>/</Kbd>
+      <span style={HINT_TEXT_STYLE}>{t('hintSearch')}</span>
       <span style={HINT_GAP_STYLE} aria-hidden="true" />
       <Kbd>Esc</Kbd>
       <span style={HINT_TEXT_STYLE}>{t('hintClose')}</span>
@@ -736,12 +964,35 @@ export function MessagesOverlay({ config, loadOlder, hasMore, sessionTotals, t }
    * more often than it moves the rows.
    */
   const [totals, setTotals] = useState<SessionTotals | null>(null)
+  /**
+   * Search keeps TWO strings, and the split is the whole contract: `query` is what
+   * the box holds, `submitted` is what the list was filtered by. They differ
+   * exactly while the reader has typed something they have not searched for —
+   * which is what the button's emphasis reports.
+   */
+  const [query, setQuery] = useState('')
+  const [submitted, setSubmitted] = useState('')
+  const searchRef = useRef<HTMLInputElement | null>(null)
+
+  /**
+   * The rows every other computation works on: the collected list, filtered by the
+   * submitted query.
+   *
+   * Holding this apart from `entries` is what lets the corpus keep growing —
+   * paging, the prefetch, a matching page arriving later — while the visible slice
+   * stays the answer to the query; and it means no navigation path has to know
+   * that search exists at all.
+   */
+  const visible = useMemo(
+    () => (isBlankQuery(submitted) ? entries : entries.filter(entry => matchesEntry(entry, submitted))),
+    [entries, submitted],
+  )
 
   const active = useMemo(() => {
-    if (activeId === null) return Math.max(0, entries.length - 1)
-    const index = entries.findIndex(entry => entry.id === activeId)
-    return index < 0 ? Math.max(0, entries.length - 1) : index
-  }, [entries, activeId])
+    if (activeId === null) return Math.max(0, visible.length - 1)
+    const index = visible.findIndex(entry => entry.id === activeId)
+    return index < 0 ? Math.max(0, visible.length - 1) : index
+  }, [visible, activeId])
 
   const close = useCallback(() => { setOpen(false) }, [])
 
@@ -767,9 +1018,35 @@ export function MessagesOverlay({ config, loadOlder, hasMore, sessionTotals, t }
   const syncTotals = useCallback(() => { setTotals(sessionTotals()) }, [sessionTotals])
 
   const setActiveAt = useCallback((index: number) => {
-    const clamped = Math.max(0, Math.min(index, entries.length - 1))
-    setActiveId(entries[clamped]?.id ?? null)
-  }, [entries])
+    const clamped = Math.max(0, Math.min(index, visible.length - 1))
+    setActiveId(visible[clamped]?.id ?? null)
+  }, [visible])
+
+  /**
+   * Run the query: publish it as the submitted one, and land the highlight on its
+   * first hit.
+   *
+   * The match is computed here rather than read off `visible`, because state
+   * updates do not apply within this pass and the new highlight has to address the
+   * list the reader is about to see.
+   */
+  const submit = useCallback(() => {
+    const corpus = entriesRef.current
+    const next = isBlankQuery(query) ? corpus : corpus.filter(entry => matchesEntry(entry, query))
+    setSubmitted(query)
+    setActiveId(next[0]?.id ?? null)
+  }, [query])
+
+  /**
+   * Clear the box and the filter together — one action for the reader. An emptied
+   * box still showing filtered results would misstate the list, and the caret goes
+   * back to the box so a retype needs no second gesture.
+   */
+  const clearSearch = useCallback(() => {
+    setQuery('')
+    setSubmitted('')
+    searchRef.current?.focus()
+  }, [])
 
   // The list is a snapshot of the rendered window: rebuild on every open so a
   // session that grew (or paged in) while closed is reflected.
@@ -844,6 +1121,11 @@ export function MessagesOverlay({ config, loadOlder, hasMore, sessionTotals, t }
   // the reposition lands before the browser paints (no empty-list flash).
   useLayoutEffect(() => {
     if (!open) return
+    // A fresh open starts unfiltered, with an empty box: the dialog's first job is
+    // position, and a query left over from last time would silently hide part of
+    // the list it exists to navigate.
+    setQuery('')
+    setSubmitted('')
     refresh()
   }, [open, refresh])
 
@@ -866,9 +1148,15 @@ export function MessagesOverlay({ config, loadOlder, hasMore, sessionTotals, t }
   // id, so prepending N rows moves its index up by N, out of the trigger zone.
   useEffect(() => {
     if (!open) return
+    // Suspended while a search is running. The self-limit above counts on the
+    // highlight moving up as rows are prepended, and a filtered list does not move
+    // when the prepended rows are not matches — the loop would crawl the whole
+    // history in behind a reader who is sitting still. Reaching further back
+    // becomes an explicit act instead; see the Enter branch below.
+    if (!isBlankQuery(submitted)) return
     if (active > PREFETCH_AHEAD) return
     void fill(entries.length + 1)
-  }, [open, active, entries, fill])
+  }, [open, active, entries, submitted, fill])
 
   // Navigation: armed only while open. Scrolling the highlight into the
   // listbox window is NOT done here — it lives in the effect below, which is
@@ -886,9 +1174,9 @@ export function MessagesOverlay({ config, loadOlder, hasMore, sessionTotals, t }
     // row's position can be measured before React re-renders.
     const page = (direction: 1 | -1): void => {
       const listbox = listboxRef.current
-      if (listbox === null || entries.length === 0) return
+      if (listbox === null || visible.length === 0) return
       const step = pageStep(listbox)
-      const to = Math.max(0, Math.min(active + direction * step, entries.length - 1))
+      const to = Math.max(0, Math.min(active + direction * step, visible.length - 1))
       if (to === active) return
       const keep = rowOffset(listbox, active)
       const moved = rowOffset(listbox, to)
@@ -901,6 +1189,15 @@ export function MessagesOverlay({ config, loadOlder, hasMore, sessionTotals, t }
       }
     }
     return onDocumentKeyDown((event) => {
+      // `/` focuses the box — but only while the box does not already hold the
+      // caret, because inside it `/` is a character the reader is typing (a date,
+      // a path) and stealing it would make those queries impossible to enter.
+      if (event.key === '/' && !event.ctrlKey && !event.metaKey && !event.altKey
+        && document.activeElement !== searchRef.current) {
+        event.preventDefault()
+        searchRef.current?.focus()
+        return
+      }
       if (event.altKey && (event.key === 'ArrowDown' || event.key === 'PageDown')) {
         event.preventDefault()
         page(1)
@@ -932,15 +1229,34 @@ export function MessagesOverlay({ config, loadOlder, hasMore, sessionTotals, t }
         return
       }
       if (event.key === 'Enter') {
+        // An IME's candidate-confirmation Enter must never be read as a submit:
+        // for this plugin's CJK readers it is the most common Enter there is.
+        if (event.isComposing) return
         event.preventDefault()
-        const entry = entries[active]
+        // Enter carries two meanings, and which one applies is decided by state
+        // rather than by a mode: it submits while the box holds something the list
+        // has not been filtered by, and it jumps otherwise. That makes
+        // "type, Enter, arrow, Enter" one continuous gesture.
+        if (query !== submitted) {
+          submit()
+          return
+        }
+        // Nothing matched, so there is nothing to jump to and the one thing the
+        // reader can still mean is "look further back": widen the corpus by a page
+        // and let the filter re-run over it. Bounded by construction — each press
+        // buys exactly one page, and `fill` stops when `hasMore` does.
+        if (visible.length === 0) {
+          if (hasMore()) void fill(entriesRef.current.length + 1)
+          return
+        }
+        const entry = visible[active]
         if (entry === undefined) return
         const row = rowOf(entry.id)
         if (row !== null) landOnRow(row)
         setOpen(false)
       }
     })
-  }, [open, entries, active])
+  }, [open, visible, active, query, submitted, submit, fill, hasMore])
 
   // Wheel over the list moves the highlight, one row per notch, exactly as
   // ArrowUp/ArrowDown do: the reader picks with the wheel and the list follows.
@@ -953,14 +1269,14 @@ export function MessagesOverlay({ config, loadOlder, hasMore, sessionTotals, t }
   useEffect(() => {
     if (!open) return undefined
     const listbox = listboxRef.current
-    if (listbox === null || entries.length === 0) return undefined
+    if (listbox === null || visible.length === 0) return undefined
     let travel = 0
     const step = (direction: 1 | -1): void => {
       setActiveId((current) => {
-        const found = current === null ? -1 : entries.findIndex(entry => entry.id === current)
-        const from = found < 0 ? entries.length - 1 : found
-        const to = Math.max(0, Math.min(from + direction, entries.length - 1))
-        return entries[to]?.id ?? null
+        const found = current === null ? -1 : visible.findIndex(entry => entry.id === current)
+        const from = found < 0 ? visible.length - 1 : found
+        const to = Math.max(0, Math.min(from + direction, visible.length - 1))
+        return visible[to]?.id ?? null
       })
     }
     const onWheel = (event: WheelEvent): void => {
@@ -987,7 +1303,7 @@ export function MessagesOverlay({ config, loadOlder, hasMore, sessionTotals, t }
     }
     listbox.addEventListener('wheel', onWheel, { passive: false })
     return () => { listbox.removeEventListener('wheel', onWheel) }
-  }, [open, entries, config.wheelInverted])
+  }, [open, visible, config.wheelInverted])
 
   // A shrinking list must never leave the highlight past its end.
   // Keep the highlight inside the listbox window for every path that moves it:
@@ -999,7 +1315,7 @@ export function MessagesOverlay({ config, loadOlder, hasMore, sessionTotals, t }
   useEffect(() => {
     if (!open) return
     scrollRowIntoView(listboxRef.current, active)
-  }, [open, entries, active])
+  }, [open, visible, active])
 
   const jumpTo = (id: string): void => {
     const row = rowOf(id)
@@ -1007,18 +1323,45 @@ export function MessagesOverlay({ config, loadOlder, hasMore, sessionTotals, t }
     setOpen(false)
   }
 
+  /**
+   * What Escape means, in one place: unwind the search first, then the dialog.
+   *
+   * A submitted query counts as much as a typed one, so a filter can never be left
+   * running invisibly behind an emptied box. `Dialog` routes its Escape here
+   * rather than closing directly.
+   */
+  const dismiss = useCallback(() => {
+    if (isBlankQuery(query) && isBlankQuery(submitted)) { close(); return }
+    clearSearch()
+  }, [query, submitted, clearSearch, close])
+
   if (!open) return null
 
-  // Which slice of the collected list the listbox renders. Row ids, the
-  // `active` comparison, and every measurement below stay indexed against the
-  // FULL list, so the highlight still addresses its own row once the window
-  // slides away from index 0.
-  const start = windowStart(active, entries.length, config.maxRows)
+  // Which slice of the visible list the listbox renders. Row ids, the `active`
+  // comparison, and every measurement below stay indexed against the FULL visible
+  // list, so the highlight still addresses its own row once the window slides away
+  // from index 0.
+  const start = windowStart(active, visible.length, config.maxRows)
+  const searching = !isBlankQuery(submitted)
 
   return (
-    <Dialog title={t('title')} closeLabel={t('closeLabel')} onClose={close}>
-      <ListHeader totals={totals} count={entries.length} t={t} />
-      {entries.length > 0 && (
+    <Dialog title={t('title')} closeLabel={t('closeLabel')} onClose={dismiss}>
+      <ListHeader
+        totals={totals}
+        count={entries.length}
+        matches={searching ? visible.length : null}
+        t={t}
+      />
+      <SearchRow
+        query={query}
+        inputRef={searchRef}
+        dirty={query !== submitted}
+        onChange={setQuery}
+        onSubmit={submit}
+        onClear={clearSearch}
+        t={t}
+      />
+      {visible.length > 0 && (
         <div
           ref={listboxRef}
           role="listbox"
@@ -1026,7 +1369,7 @@ export function MessagesOverlay({ config, loadOlder, hasMore, sessionTotals, t }
           aria-activedescendant={rowId(active)}
           style={LIST_STYLE}
         >
-          {entries.slice(start, start + config.maxRows).map((entry, offset) => {
+          {visible.slice(start, start + config.maxRows).map((entry, offset) => {
             const index = start + offset
             return (
               <MessageRow
@@ -1037,10 +1380,17 @@ export function MessagesOverlay({ config, loadOlder, hasMore, sessionTotals, t }
                 onActivate={() => { setActiveAt(index) }}
                 onJump={() => { jumpTo(entry.id) }}
                 rowIdStr={rowId(index)}
+                query={submitted}
                 t={t}
               />
             )
           })}
+        </div>
+      )}
+      {visible.length === 0 && searching && (
+        <div style={NO_MATCH_STYLE}>
+          <div>{t('searchNone')}</div>
+          {hasMore() && <div style={NO_MATCH_HINT_STYLE}>{t('searchMore')}</div>}
         </div>
       )}
       <HintBar t={t} wheelInverted={config.wheelInverted} />

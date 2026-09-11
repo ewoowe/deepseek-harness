@@ -37,6 +37,13 @@ export type MessagesKey =
   | 'sessionCacheHit'
   | 'turnUsage'
   | 'turnDuration'
+  | 'searchPlaceholder'
+  | 'searchAction'
+  | 'searchClear'
+  | 'searchCount'
+  | 'searchNone'
+  | 'searchMore'
+  | 'hintSearch'
   | 'numberThousand'
   | 'numberMillion'
   | 'durationSeconds'
@@ -89,6 +96,20 @@ const en: Record<MessagesKey, string> = {
   // what the host renders, so an English UI is unchanged.
   turnUsage: 'Usage {value}',
   turnDuration: 'Ran for {value}',
+  // Search. The corpus is the loaded window, not the whole log — the host exposes
+  // no in-session search to a client plugin (see `search.ts`) — so the count is
+  // phrased as a share of what IS loaded rather than as a bare total.
+  searchPlaceholder: 'Search messages',
+  searchAction: 'Search',
+  searchClear: 'Clear search',
+  // Invariant wording, like `count`: the registry carries no plural rules, so
+  // "1 of 1 match" has to be avoided by phrasing rather than by inflection.
+  searchCount: 'Matched {matches} of {count}',
+  searchNone: 'No matching messages',
+  // Names the gesture, because the gesture is the whole affordance: with no hit
+  // on screen, a second Enter widens the corpus by one page.
+  searchMore: 'Press Enter to search further back',
+  hintSearch: 'search',
   numberThousand: '{value}K',
   numberMillion: '{value}M',
   durationSeconds: '{seconds}s',
@@ -137,6 +158,13 @@ const zh: Record<MessagesKey, string> = {
   sessionCacheHit: '缓存命中 {percent}%',
   turnUsage: '用量 {value}',
   turnDuration: '用时 {value}',
+  searchPlaceholder: '搜索消息',
+  searchAction: '搜索',
+  searchClear: '清除搜索',
+  searchCount: '匹配 {matches} / 共 {count} 条',
+  searchNone: '没有匹配的消息',
+  searchMore: '按 Enter 在更早的消息中继续搜索',
+  hintSearch: '搜索',
   numberThousand: '{value}K',
   numberMillion: '{value}M',
   durationSeconds: '{seconds}秒',
@@ -194,6 +222,13 @@ const ja: Record<MessagesKey, string> = {
   // rows rather than a second pair of synonyms.
   turnUsage: '使用量 {value}',
   turnDuration: '所要時間 {value}',
+  searchPlaceholder: 'メッセージを検索',
+  searchAction: '検索',
+  searchClear: '検索をクリア',
+  searchCount: '{count} 件中 {matches} 件が一致',
+  searchNone: '一致するメッセージはありません',
+  searchMore: 'Enter でさらに前を検索',
+  hintSearch: '検索',
   numberThousand: '{value}K',
   numberMillion: '{value}M',
   durationSeconds: '{seconds}秒',
@@ -252,6 +287,13 @@ const ko: Record<MessagesKey, string> = {
   // Same labels as the session pair above — see the Japanese note.
   turnUsage: '사용량 {value}',
   turnDuration: '소요 시간 {value}',
+  searchPlaceholder: '메시지 검색',
+  searchAction: '검색',
+  searchClear: '검색 지우기',
+  searchCount: '{count}개 중 {matches}개 일치',
+  searchNone: '일치하는 메시지가 없습니다',
+  searchMore: 'Enter를 눌러 이전 메시지에서 계속 검색',
+  hintSearch: '검색',
   numberThousand: '{value}K',
   numberMillion: '{value}M',
   durationSeconds: '{seconds}초',
@@ -310,6 +352,13 @@ const es: Record<MessagesKey, string> = {
   // Same labels as the session pair above — see the Japanese note.
   turnUsage: 'Uso {value}',
   turnDuration: 'Tiempo {value}',
+  searchPlaceholder: 'Buscar mensajes',
+  searchAction: 'Buscar',
+  searchClear: 'Borrar la búsqueda',
+  searchCount: 'Coincidencias: {matches} de {count}',
+  searchNone: 'No hay mensajes coincidentes',
+  searchMore: 'Pulsa Enter para buscar más atrás',
+  hintSearch: 'buscar',
   numberThousand: '{value}K',
   numberMillion: '{value}M',
   durationSeconds: '{seconds} s',
@@ -363,6 +412,13 @@ const fr: Record<MessagesKey, string> = {
   // Same labels as the session pair above — see the Japanese note.
   turnUsage: 'Consommation {value}',
   turnDuration: 'Durée {value}',
+  searchPlaceholder: 'Rechercher des messages',
+  searchAction: 'Rechercher',
+  searchClear: 'Effacer la recherche',
+  searchCount: 'Correspondances : {matches} sur {count}',
+  searchNone: 'Aucun message correspondant',
+  searchMore: 'Appuyez sur Entrée pour chercher plus loin',
+  hintSearch: 'rechercher',
   numberThousand: '{value}K',
   numberMillion: '{value}M',
   durationSeconds: '{seconds} s',
@@ -414,6 +470,13 @@ const de: Record<MessagesKey, string> = {
   // Same labels as the session pair above — see the Japanese note.
   turnUsage: 'Verbrauch {value}',
   turnDuration: 'Dauer {value}',
+  searchPlaceholder: 'Nachrichten durchsuchen',
+  searchAction: 'Suchen',
+  searchClear: 'Suche löschen',
+  searchCount: 'Treffer: {matches} von {count}',
+  searchNone: 'Keine passenden Nachrichten',
+  searchMore: 'Enter drücken, um weiter zurückzusuchen',
+  hintSearch: 'suchen',
   numberThousand: '{value}K',
   numberMillion: '{value}M',
   durationSeconds: '{seconds} s',

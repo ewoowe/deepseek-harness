@@ -6,7 +6,7 @@ An in-session message viewer with two surfaces:
 
 1. **Message list** (`Ctrl+S` by default): opens a list of the **messages loaded in the current
    session**; pick with the arrow keys and `Enter` (or a click) jumps the transcript to that
-   message.
+   message. The list can be searched — see [Search](#search).
 2. **Viewport strip** (optional, off by default): a block centred on the session header showing
    **the message you are currently reading**, with its clock, usage and duration. See
    [Viewport strip](#viewport-strip).
@@ -80,6 +80,7 @@ session-messages-plugin/
     client/
       index.ts                Browser half: registers the two slots and the settings card
       transcript.ts           the transcript DOM contract (collectors both consumers share)
+      search.ts               search: folded matching, hit ranges, excerpting (pure)
       overlay.tsx             the list overlay: collection and jumping
       hud.tsx                 the viewport strip (header action seat)
       use-messages-config.ts  resolve the live config (settings scope → page global)
@@ -426,6 +427,69 @@ page as the highlight comes within the oldest 8 rows (through `ISession.loadOlde
 does not fire repeatedly for the same page — the highlight is held by id, so after N rows are paged
 in its index grows by N and it leaves the trigger zone.
 
+## Search
+
+Press `/` inside the dialog to focus the box (or click it), type, then submit with `Enter` or the
+**Search** button.
+
+**Filtering as you type is deliberately not done.** The corpus is collected DOM and every collection
+pass clones rows; putting that on each keystroke costs real work and yields a list that moves under
+the reader's hands.
+
+### Matching
+
+```text
+NFC → lowercase → substring
+```
+
+- **NFC is not optional.** A Japanese `が` typed on an IME may arrive as one code point or as `か`
+  plus a combining mark; without folding, a reader can see a match and fail to find it. Folding is
+  also what keeps hit offsets on the characters actually displayed (it happens at collection time,
+  see `transcript.ts`).
+- **Plain substring, never a pattern.** A reader typing `(` or `[` is typing characters from a
+  message, not a regular expression, and an unparseable query is a failure they cannot fix by typing
+  more.
+- **Case folding is locale-independent** (`toLowerCase`, not `toLocaleLowerCase`): whether `I`
+  matches `i` must not depend on the language the UI happens to be showing.
+- **The clock is searched too**: `9/10` is a natural way to ask, and the label is already on the row.
+
+### A hit has to be visible
+
+Row previews are clamped to two lines, so a hit deep inside a message would produce a row **marked as
+a hit with no visible reason**. While a search is running the preview therefore shows the region
+around the hit, with an ellipsis at each cut end; clearing the query restores "head of message, then
+truncated". The ranges come from `search.ts` as pure functions, already rebased onto the string that
+gets rendered.
+
+### `Enter` carries three meanings
+
+Decided by state, never by a mode:
+
+| State | `Enter` |
+|---|---|
+| The box holds something unsubmitted | **submit the search** |
+| Filtering, and the box is submitted | **jump to the highlighted row** |
+| Nothing matched | **widen the corpus by one page, then filter again** |
+
+The third row is the whole of "keep looking further back" — no button, no new key. Each press buys
+exactly one page and stops when `hasMore()` does, so a query matching nothing cannot drag the entire
+history in.
+
+`Esc` unwinds one step at a time: first the search, then the dialog. A submitted query counts as much
+as a typed one, so a filter can never stay in force behind an emptied box.
+
+### Coverage
+
+**It searches the loaded window, not the session.** That is a boundary rather than a shortcut: the
+host exposes no in-session search to a client plugin — `ctx.sessions.search` is cross-session and
+answers with one best snippet per session and no message anchor, and the granularity that would fit
+(`sessionQuery.searchEvents`, whose hits carry `seq`) exists only on the host side, with no remote
+endpoint.
+
+The header therefore reports two numbers: `Matched 3 of 50`. The numerator is the hits, the
+denominator is **what was searched** — a bare numerator would read as an answer about the whole
+session.
+
 ## The dialog's session totals
 
 The top of the dialog carries three numbers for the whole session (not the loaded window):
@@ -478,6 +542,10 @@ half reads that global and falls back to the same defaults when it is absent.
 
 - Only the loaded window can be listed; older messages are paged in automatically by the fill on
   open and the prefetch near the oldest row. There is no manual button.
+  **Search covers that same window**: with no hit on screen, `Enter` is the only way further back,
+  one page at a time.
+- Search does not survive an open: the query is cleared and the full list restored each time (the
+  dialog's first job is position, not filtering).
 - The viewport strip only tracks **human messages** (`user` / `steering` rows) — that is the
   plugin's whole data model, and an assistant answer is not its subject. While reading a long answer
   it names the question that answer belongs to.

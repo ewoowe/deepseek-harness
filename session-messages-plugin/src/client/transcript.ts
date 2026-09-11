@@ -107,6 +107,12 @@ function looksLikeTimestamp(text: string): boolean {
  *
  * Cloning is the expensive part, so callers on a hot path (the HUD's scroll
  * reader) resolve the ONE row they need before calling this.
+ *
+ * The text comes back NFC-normalized. That is what keeps search honest: an IME
+ * can put `が` in the DOM as one code point or as `か` plus a combining mark, so
+ * without folding at the source a reader could see a match and fail to find it —
+ * and, worse, the offsets search computes would index a string other than the
+ * one on screen. NFC and NFD draw identically, so nothing changes visually.
  */
 export function splitEntry(row: HTMLElement): { text: string; timestamp: string | null } {
   const clone = row.cloneNode(true) as HTMLElement
@@ -119,7 +125,7 @@ export function splitEntry(row: HTMLElement): { text: string; timestamp: string 
     if (timestamp === null) timestamp = t
     el.remove()
   }
-  const text = (clone.textContent ?? '').replace(/\s+/gu, ' ').trim()
+  const text = (clone.textContent ?? '').replace(/\s+/gu, ' ').trim().normalize('NFC')
   return { text, timestamp }
 }
 
