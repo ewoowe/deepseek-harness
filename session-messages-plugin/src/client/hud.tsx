@@ -25,35 +25,32 @@
  * It is opted into through the `showHud` setting and renders nothing otherwise.
  */
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
-import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
+import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { Tag } from '@deepseek-ai/dsh-client-ui-primitives'
+// Type-only merge: pulls in the session standard props (`useProjection`) the
+// component below destructures off `PropsRuntime`.
+import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import {
   LAND_OFFSET_PX, MESSAGE_ROW_SELECTOR, scrollport, splitEntry, turnStatsOfTurn,
 } from './transcript.ts'
-import type { MessagesKey } from './locales.ts'
+import { NS } from './locales.ts'
+import { cacheHitOfUsage, modelOfSelection } from './session-totals.ts'
 import { useMessagesConfig } from './use-messages-config.ts'
 
 /**
- * The session-wide facts the strip shows beside the per-turn ones. Both come
- * from the current session's projections; see `session-totals.ts` for why a
- * per-turn model and cache share are not reachable from a third-party plugin.
+ * Props the header seat hands the component.
+ *
+ * `PropsRuntime` carries the seat's own shares plus the SESSION standard props —
+ * `sessionId`, `useSession` and `useProjection`. Reading the projections through
+ * `useProjection` rather than through an injected face is what keeps the model
+ * and the cache share from going missing: that read is reactive, so a field
+ * appears the moment the Host publishes it, where a poll could return empty
+ * simply because it ran before the session binding existed.
  */
-export interface ViewportSessionFacts {
-  /** Model the session's most recent request used; null when none is recorded. */
-  readonly model: string | null
-  /** Cache reads as a share of billed input, session-wide; null when nothing was billed. */
-  readonly cacheHitPercent: number | null
-}
+export type ViewportMessageHudProps =
+  PropsRuntime<'conversation.session.header.actions'> & PropsLocale<typeof NS>
 
-/** Props the header seat hands the component: the injected face and the locale seat. */
-export interface ViewportMessageHudProps {
-  /** Injected: read the current session's model and cache share. */
-  sessionFacts: () => ViewportSessionFacts
-  /** Locale-bound translate function. */
-  t: Translate<MessagesKey>
-}
-
-/** What the strip renders. */
+/** What the strip renders from the transcript. */
 interface ViewportReading {
   /** Message text, timestamp leaf stripped. */
   readonly text: string
@@ -63,11 +60,6 @@ interface ViewportReading {
   readonly usage: string | null
   /** Duration pill label of the row's turn, null when the turn carries none. */
   readonly duration: string | null
-  /**
-   * Session-wide facts, carried inside the reading so the frame loop's
-   * identity comparison below notices them changing while the message does not.
-   */
-  readonly facts: ViewportSessionFacts
 }
 
 /** The row the reader is on, with the stats that do not need a clone. */
@@ -169,10 +161,6 @@ function sameReading(a: ViewportReading | null, b: ViewportReading | null): bool
   if (a === null || b === null) return a === b
   return a.text === b.text && a.timestamp === b.timestamp
     && a.usage === b.usage && a.duration === b.duration
-    // The session facts can move while the message under the fold does not:
-    // the model changes on the next request, the cache share on every turn.
-    && a.facts.model === b.facts.model
-    && a.facts.cacheHitPercent === b.facts.cacheHitPercent
 }
 
 /**
@@ -227,9 +215,15 @@ function placeStrip(node: HTMLElement): void {
  * @param props - the injected session facts and the locale seat.
  * @returns the strip, or null while disabled or with no message to name.
  */
-export function ViewportMessageHud({ sessionFacts, t }: ViewportMessageHudProps): ReactNode {
+export function ViewportMessageHud({ useProjection, t }: ViewportMessageHudProps): ReactNode {
   const config = useMessagesConfig()
   const enabled = config.showHud
+  // Reactive, session-scoped reads. See the props type above for why these are
+  // not polled through an injected face.
+  const selection = useProjection('modelSelection')
+  const usage = useProjection('tokenUsage')
+  const model = modelOfSelection(selection)
+  const cacheHitPercent = cacheHitOfUsage(usage)
   const [reading, setReading] = useState<ViewportReading | null>(null)
   /**
    * The split of the last row read, kept across frames. Splitting clones the
@@ -278,9 +272,6 @@ export function ViewportMessageHud({ sessionFacts, t }: ViewportMessageHudProps)
         timestamp: split.timestamp,
         usage: hit.usage,
         duration: hit.duration,
-        // Read every frame, not just on a row change: these move on their own
-        // schedule and the identity check below is what lets them through.
-        facts: sessionFacts(),
       }
       // A new object every frame would re-render the strip on every animation
       // frame of a scroll; handing React the same reference bails out instead.
@@ -309,21 +300,25 @@ export function ViewportMessageHud({ sessionFacts, t }: ViewportMessageHudProps)
       window.removeEventListener('resize', schedule)
       window.clearInterval(timer)
     }
-  }, [enabled, sessionFacts])
+  }, [enabled])
 
   if (!enabled || reading === null) return null
 
-  const { facts } = reading
   // Two capsules, one per axis of the sentence: "when and with what" on the
-  // left, "what it cost" on the right. Every label in them is either the host's
-  // own (`消费 1.2k` / `用时 12.3s`, taken verbatim from the turn tail) or this
-  // plugin's (`缓存命中`, the same key the dialog header uses); the parts share a
-  // capsule because each already names itself.
-  const context = [reading.timestamp, facts.model].filter(value => value !== null).join(' · ')
-  const cacheHit = facts.cacheHitPercent === null
+  // left, "what it cost" on the right. The parts share a capsule because each
+  // already names itself — which is why nothing here may be the host's own copy:
+  // the two numbers come from the turn tail, but their labels are this plugin's
+  // `turnUsage` / `turnDuration`, since the host's own pill label stays English
+  // under any language-pack locale.
+  const context = [reading.timestamp, model].filter(value => value !== null).join(' · ')
+  const cacheHit = cacheHitPercent === null
     ? null
-    : t('sessionCacheHit', { percent: String(facts.cacheHitPercent) })
-  const costs = [reading.usage, reading.duration, cacheHit].filter(value => value !== null).join(' · ')
+    : t('sessionCacheHit', { percent: String(cacheHitPercent) })
+  const costs = [
+    reading.usage === null ? null : t('turnUsage', { value: reading.usage }),
+    reading.duration === null ? null : t('turnDuration', { value: reading.duration }),
+    cacheHit,
+  ].filter(value => value !== null).join(' · ')
   return (
     // aria-hidden: the strip repeats content the transcript already renders, so
     // announcing it again would only make a screen reader say everything twice.

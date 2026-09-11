@@ -42,9 +42,9 @@ export interface MessageEntry {
   readonly text: string
   /** Clock label rendered by ui-chat's IconActions (for example `21:36`); null when absent. */
   readonly timestamp: string | null
-  /** Usage pill label of this message's turn (for example `消费 1.2k`); null when the turn carries none. */
+  /** Usage value of this message's turn, as the host's pill renders it (`1.06k tok`); null when the turn carries none. */
   readonly usage: string | null
-  /** Duration pill label of this message's turn (for example `用时 12.3s`); null when the turn carries none. */
+  /** Duration value of this message's turn (`21s`); null when the turn carries none. */
   readonly duration: string | null
   /** Whether the row sat inside the transcript's scroll viewport when collected. */
   readonly visible: boolean
@@ -381,6 +381,13 @@ const DIALOG_HEADER_STYLE: CSSProperties = {
 
 const DIALOG_TITLE_STYLE: CSSProperties = {
   margin: 0,
+  // Ellipsized, not wrapped: the close button beside it is `flex: none`, and a
+  // long title in a verbose language would otherwise push it out of the header.
+  flex: 1,
+  minWidth: 0,
+  overflow: 'hidden',
+  whiteSpace: 'nowrap',
+  textOverflow: 'ellipsis',
   fontSize: 16,
   lineHeight: '24px',
   fontWeight: 500,
@@ -449,7 +456,16 @@ const LIST_HEADER_STYLE: CSSProperties = {
   gap: 12,
 }
 
+/**
+ * Ellipsized rather than wrapped, and shrinkable, so a verbose language cannot
+ * push the loaded count off the row: the count is `flex: none` and stays pinned
+ * to the right, while these three figures give way.
+ */
 const SESSION_STATS_STYLE: CSSProperties = {
+  minWidth: 0,
+  overflow: 'hidden',
+  whiteSpace: 'nowrap',
+  textOverflow: 'ellipsis',
   fontSize: 12,
   color: 'var(--dsw-alias-label-primary)',
 }
@@ -472,9 +488,10 @@ interface MessageRowProps {
   readonly onActivate: () => void
   readonly onJump: () => void
   readonly rowIdStr: string
+  readonly t: Translate<MessagesKey>
 }
 
-function MessageRow({ entry, index, active, onActivate, onJump, rowIdStr }: MessageRowProps): ReactNode {
+function MessageRow({ entry, index, active, onActivate, onJump, rowIdStr, t }: MessageRowProps): ReactNode {
   const hasStats = entry.usage !== null || entry.duration !== null
   return (
     <button
@@ -489,9 +506,13 @@ function MessageRow({ entry, index, active, onActivate, onJump, rowIdStr }: Mess
       <span style={INDEX_STYLE}>{index + 1}</span>
       <span style={TEXT_STYLE}>{entry.text.slice(0, MAX_PREVIEW_CHARS)}</span>
       {hasStats && (
+        // Labelled here rather than printed as scraped: the host's own pill label
+        // is English under any language-pack locale (the shell ships zh and en),
+        // so the row would otherwise carry `Usage …` / `Ran for …` into a
+        // translated UI. The number inside still comes from that pill verbatim.
         <span style={STATS_STYLE}>
-          {entry.usage !== null && <span>{entry.usage}</span>}
-          {entry.duration !== null && <span>{entry.duration}</span>}
+          {entry.usage !== null && <span>{t('turnUsage', { value: entry.usage })}</span>}
+          {entry.duration !== null && <span>{t('turnDuration', { value: entry.duration })}</span>}
         </span>
       )}
       {entry.timestamp !== null && <span style={TIME_STYLE}>{entry.timestamp}</span>}
@@ -1016,6 +1037,7 @@ export function MessagesOverlay({ config, loadOlder, hasMore, sessionTotals, t }
                 onActivate={() => { setActiveAt(index) }}
                 onJump={() => { jumpTo(entry.id) }}
                 rowIdStr={rowId(index)}
+                t={t}
               />
             )
           })}

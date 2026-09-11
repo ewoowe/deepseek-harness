@@ -12,11 +12,17 @@
  *
  * Granularity is worth stating plainly, because the strip mixes two: a turn's
  * usage and duration come from that turn's own tail pills, while everything
- * here is SESSION-wide. Per-turn model and cache share do exist in the client
- * (`TurnTokenUsage.routes` / `cacheReadTokens`, folded in the browser by
- * `turn-tail.ts`) but they live only on ui-chat's node data, behind the node
- * store a third-party plugin cannot reach — and the turn-usage dialog that
- * renders them is only mounted while it is open.
+ * here is SESSION-wide.
+ *
+ * Those two numbers ARE reachable over a public API — a `conversation.chat.node`
+ * occupant is handed its `ChatNode` plus a `useTurnData` hook, enough to read
+ * that Turn's `TurnTokenUsage` and derive its wall time from
+ * `node.location.turn.start/end`. But the hook is scoped to the ONE turn that
+ * node renders, and this plugin cannot take such a seat: the slot's keys are
+ * ui-chat's own `ChatNodeKind`s, and occupying one REPLACES ui-chat's renderer.
+ * The list needs EVERY turn and the strip needs whichever turn sits under the
+ * fold, so the tail pills stay the only source that answers "any turn, both
+ * numbers" — at the price of reading formatted text rather than numbers.
  *
  * Formatting follows the host's own conventions so the header reads like the
  * rest of the product: the same compact token count, the same `45.2s` /
@@ -56,6 +62,12 @@ interface TokenUsageView {
   cacheWriteTokens?: number
 }
 
+/** The `modelSelection` projection's view fields this module reads. */
+interface ModelSelectionView {
+  lastUsed?: { provider?: unknown; model?: unknown } | null
+  next?: { provider?: unknown; model?: unknown } | null
+}
+
 /**
  * Cache-hit share of billed input, or null when there is no billed input.
  *
@@ -82,40 +94,54 @@ export function readSessionTotals(projections: ProjectionsFaceLike): SessionTota
   const stats = projections.faceOf('sessionStats').getSnapshot() as SessionStatsView | undefined
   const usage = projections.faceOf('tokenUsage').getSnapshot() as TokenUsageView | undefined
   if (stats === undefined && usage === undefined) return null
-  const billedInput = (usage?.uncachedInputTokens ?? 0)
-    + (usage?.cacheReadTokens ?? 0)
-    + (usage?.cacheWriteTokens ?? 0)
   return {
     busyMs: (stats?.llmMs ?? 0) + (stats?.toolMs ?? 0),
-    totalTokens: billedInput + (usage?.outputTokens ?? 0),
-    cacheHitPercent: cacheHitPercent(usage?.cacheReadTokens ?? 0, billedInput),
+    totalTokens: billedInputOf(usage) + (usage?.outputTokens ?? 0),
+    cacheHitPercent: cacheHitOfUsage(usage),
   }
 }
 
-/** The `modelSelection` projection's view fields this module reads. */
-interface ModelSelectionView {
-  lastUsed?: { provider?: unknown; model?: unknown } | null
-  next?: { provider?: unknown; model?: unknown } | null
+/** Billed prompt tokens: the three disjoint input buckets, summed. */
+function billedInputOf(usage: TokenUsageView | undefined): number {
+  return (usage?.uncachedInputTokens ?? 0)
+    + (usage?.cacheReadTokens ?? 0)
+    + (usage?.cacheWriteTokens ?? 0)
 }
 
 /**
- * Read the model the session is running.
+ * Cache-hit share of one `tokenUsage` view, or null when nothing was billed.
+ *
+ * Exposed over the raw view, not over a face, because the viewport strip reads
+ * its projections through the slot's standard `useProjection` seat: that read is
+ * reactive, so the field appears the moment the Host publishes it instead of
+ * waiting for the next poll, and it cannot come back empty just because the
+ * frame loop happened to run before the session binding existed.
+ * @param value - the projection's view, or undefined while the unit is absent.
+ * @returns the share to print, or null.
+ */
+export function cacheHitOfUsage(value: unknown): number | null {
+  const usage = value as TokenUsageView | undefined
+  return cacheHitPercent(usage?.cacheReadTokens ?? 0, billedInputOf(usage))
+}
+
+/**
+ * The model a session runs, from one `modelSelection` view.
  *
  * `lastUsed` is the route the most recent request actually went out on — the
  * honest answer to "which model produced what I am looking at". `next` is the
- * fallback for a session that has picked a model but not sent a request yet
+ * fallback for a session that has picked a model but not yet sent a request
  * (`next` is the projection's own `pending ?? lastUsed`, so it is never older).
  *
- * Only the model id is read, not a human-readable name: the display name lives
- * in the model DIRECTORY service, which is a selection surface that lazily
- * creates per-session state and throws for a session outside the active list —
- * not something a read-only label should pull in.
- * @param projections - the owning session's projection read face.
- * @returns the model id, or null when the session records no route.
+ * Only the model id is read, not a human-readable name: the display name lives in
+ * the model DIRECTORY service, which is a selection surface that lazily creates
+ * per-session state and throws for a session outside the active list — not
+ * something a read-only label should pull in.
+ * @param value - the projection's view, or undefined while the unit is absent.
+ * @returns the model id, or null when no route is recorded.
  */
-export function readSessionModel(projections: ProjectionsFaceLike): string | null {
-  const value = projections.faceOf('modelSelection').getSnapshot() as ModelSelectionView | undefined
-  const chosen = value?.lastUsed ?? value?.next
+export function modelOfSelection(value: unknown): string | null {
+  const selection = value as ModelSelectionView | undefined
+  const chosen = selection?.lastUsed ?? selection?.next
   const model = chosen?.model
   return typeof model === 'string' && model !== '' ? model : null
 }

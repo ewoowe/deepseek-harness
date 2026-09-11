@@ -26,15 +26,12 @@ import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { SettingsScope } from '@deepseek-ai/dsh-client-ui-settings/client'
 import { MessagesOverlaySlot, type MessagesOverlaySlotProps } from './overlay.tsx'
-import { ViewportMessageHud, type ViewportSessionFacts } from './hud.tsx'
+import { ViewportMessageHud } from './hud.tsx'
 import { MessagesSettingsCard } from './settings-card.tsx'
-import { readSessionModel, readSessionTotals, type SessionTotals } from './session-totals.ts'
+import { readSessionTotals, type SessionTotals } from './session-totals.ts'
 import { publishScope } from './settings-scope-holder.ts'
 import type { MessagesConfig } from '../shared.ts'
-import { en, zh, type MessagesKey } from './locales.ts'
-
-/** Locale namespace owning the overlay and settings card copy. */
-const NS = 'sessionMessages'
+import { en, NS, PACK_LOCALES, zh, type MessagesKey } from './locales.ts'
 
 /** Settings namespace shared with the Node half (see `SETTINGS_NAMESPACE` in src/index.ts). */
 const SETTINGS_NAMESPACE = 'session-messages'
@@ -89,9 +86,26 @@ function renderSettingsEntry(
  * @param ctx - client root context.
  */
 export function apply(ctx: ClientContext): void {
-  ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'session-messages: dictionaries')
+  // The two locales the shell ships register together in the typed
+  // `Record<BuiltInLocaleId, …>` form; the language-pack locales register one
+  // namespace each, through the single-locale overload the docs reserve for
+  // exactly this. Definitions stay the pack's business — see `locales.ts` for
+  // why this plugin never calls `addLanguage`.
+  ctx.effect(() => {
+    const disposers = [
+      ctx.locale.register(NS, { zh, en }),
+      ...Object.entries(PACK_LOCALES)
+        .map(([locale, dict]) => ctx.locale.register(NS, locale, dict)),
+    ]
+    return () => { for (const dispose of disposers) dispose() }
+  }, 'session-messages: dictionaries')
 
   ctx.inject(['slots', 'sessions', 'locale'], (scope: ClientContext) => {
+    // Bound once, resolved per read: `bind` reads the ACTIVE locale at call
+    // time, which is what lets the registration-time strings below follow a
+    // locale switch without re-registering.
+    const t = scope.locale.bind(NS)
+
     // The overlay needs only `sessions`; it reads its own configuration from
     // the settings scope through the holder, falling back to the index-page
     // global until that scope is bound.
@@ -99,7 +113,10 @@ export function apply(ctx: ClientContext): void {
       name: 'shell.overlay',
       id: 'session-messages',
       order: 100,
-      label: 'Session messages',
+      // A thunk, not a string: `SlotLabel` re-evaluates it on every read, so
+      // the name the slot ledger shows for this entry is localized like the
+      // surface it opens.
+      label: () => t('settingsTitle'),
       locale: NS,
       inject: () => ({
         // Page one earlier messages window in through the current session's
@@ -144,24 +161,6 @@ export function apply(ctx: ClientContext): void {
         // metadata rather than as a control beside them.
         order: 30,
         locale: NS,
-        inject: () => ({
-          // The session-wide half of what the strip shows. Both come from the
-          // current session's projection faces — the same read the overlay's
-          // header does. They are session-wide because that is the only
-          // granularity the client publishes: a turn's own model and cache share
-          // exist in the browser (ui-chat folds them) but only on its node data,
-          // which a third-party plugin cannot reach.
-          sessionFacts: (): ViewportSessionFacts => {
-            const current = scope.sessions.list.getSnapshot().current
-            if (current === undefined) return { model: null, cacheHitPercent: null }
-            const session = scope.sessions.binding(current)?.session
-            if (session === undefined) return { model: null, cacheHitPercent: null }
-            return {
-              model: readSessionModel(session.projections),
-              cacheHitPercent: readSessionTotals(session.projections)?.cacheHitPercent ?? null,
-            }
-          },
-        }),
       }, ViewportMessageHud))
   })
 

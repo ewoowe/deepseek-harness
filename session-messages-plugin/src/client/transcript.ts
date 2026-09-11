@@ -47,7 +47,13 @@ export const VISIBLE_MIN_PX = 30
  */
 export const LAND_OFFSET_PX = 24
 
-/** A turn's usage and duration labels; both null when the turn carries neither. */
+/**
+ * A turn's usage and duration VALUES, as the host's tail pills render them (for
+ * example `1.06k tok` and `21s`); both null when the turn carries neither.
+ *
+ * The value only — never the host's label in front of it. See
+ * {@link valueOfLabel} for why the label is dropped.
+ */
 export interface TurnStats {
   readonly usage: string | null
   readonly duration: string | null
@@ -57,14 +63,32 @@ export interface TurnStats {
 export const NO_TURN_STATS: TurnStats = { usage: null, duration: null }
 
 /**
- * Identify a clock label leaf. ui-chat's `formatMessageClock` (in
- * `packages/client/ui-chat/src/client/chat/message-chrome.ts`) produces three
- * families: same-day `HH:mm`; same-year `M月D日` (zh) or `Mon D[, YYYY]`
- * (en) optionally followed by `HH:mm`; and the same with a four-digit year.
- * Strict full-string match — a substring of the message text that happens to
- * contain a time-shaped fragment is intentionally NOT considered a timestamp.
+ * Identify a clock label leaf.
+ *
+ * ui-chat's `formatMessageClock` (in
+ * `packages/client/ui-chat/src/client/chat/message-chrome.ts`) returns a bare
+ * `HH:mm` for today, or `` `${md} ${HH:mm}` `` otherwise, where `md` comes from
+ * the active locale's `clock.md` / `clock.ymd` TEMPLATE. Those templates are the
+ * authority, so this mirrors them rather than guessing how a language writes a
+ * date:
+ *
+ * | Locale | `clock.md` | `clock.ymd` |
+ * |---|---|---|
+ * | `zh` | `{m}月{d}日` | `{y}年{m}月{d}日` |
+ * | `en` | `{m}/{d}` | `{y}-{m}-{d}` |
+ *
+ * Every other locale falls back to `en`, so those five shapes are everything the
+ * host can print. An earlier version of this pattern was written against an
+ * English form (`Mon D`) the host does not produce: it did not match `9/10
+ * 20:16`, so the clock leaf was never stripped and the timestamp stayed glued to
+ * the end of the message text — in both surfaces, since both read through here.
+ *
+ * The clock is REQUIRED on the date branches, which keeps a message that reads
+ * like a bare date (`1/2`) from being mistaken for one. Strict full-string
+ * match: a time-shaped fragment inside a sentence is intentionally not a
+ * timestamp.
  */
-const TIMESTAMP_PATTERN = /^(?:\d{1,2}:\d{2}|\d{1,2}月\d{1,2}日|\d{4}[-/\u5e74]\d{1,2}[-/\u6708]\d{1,2}\u65e5?|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}(?:,\s+\d{4})?)(?:\s+\d{1,2}:\d{2})?$/u
+const TIMESTAMP_PATTERN = /^(?:\d{1,2}:\d{2}|\d{1,2}月\d{1,2}日\s+\d{1,2}:\d{2}|\d{4}年\d{1,2}月\d{1,2}日\s+\d{1,2}:\d{2}|\d{1,2}\/\d{1,2}\s+\d{1,2}:\d{2}|\d{4}-\d{1,2}-\d{1,2}\s+\d{1,2}:\d{2})$/u
 
 function looksLikeTimestamp(text: string): boolean {
   const t = text.trim()
@@ -100,20 +124,45 @@ export function splitEntry(row: HTMLElement): { text: string; timestamp: string 
 }
 
 /**
- * Read one turn tail's usage and duration labels.
+ * The value half of a host pill label: everything from its first digit on.
+ *
+ * The host renders `<label> <value>` — `Usage 1.06k tok`, `Ran for 21s` — and
+ * the plugin keeps only the value, because the label cannot be trusted: the
+ * shell ships `zh` and `en` alone (see `locales.ts`), so under a language-pack
+ * locale the host falls back to English and `Usage 1.06k tok` lands in a
+ * Japanese UI. Re-labelling with this plugin's own `turnUsage` / `turnDuration`
+ * fixes that, while the number and its formatting still come from the host —
+ * which is the part this plugin cannot derive: per-turn usage and wall time reach
+ * a plugin only through a `conversation.chat.node` seat, and only for the single
+ * turn that seat renders (see `session-totals.ts`).
+ *
+ * Slicing at the first digit is safe for the same reason the caller filters on
+ * one: both host labels are a noun phrase followed by a number, and neither
+ * noun phrase contains a digit.
+ * @param label - the pill's trimmed text, known to contain a digit.
+ * @returns the label's tail from that digit on.
+ */
+function valueOfLabel(label: string): string {
+  const at = label.search(/\d/u)
+  return at === -1 ? label : label.slice(at)
+}
+
+/**
+ * Read one turn tail's usage and duration values.
  *
  * The host owns both the numbers and their formatting: a turn's tail already
- * carries a usage pill (`消费 1.2k` / `Consumed 1.2k`) and a duration pill
- * (`用时 12.3s` / `Ran for 12.3s`), localized by ui-chat, so this plugin reuses
- * those labels instead of deriving tokens or wall time itself. The pills are
- * plain buttons with hashed class names, so they are located by contract
- * position: the tail's LAST two `aria-haspopup="dialog"` buttons are exactly
- * the usage panel and the time panel, in that order (TurnTailNodeView seats
- * them after the branch action). Their icons tell them apart — the usage pill
- * draws an ellipse, the time pill a circle. A pill hidden by the tail's
- * hover-reveal keeps its text; opacity does not remove it from the DOM.
+ * carries a usage pill (`用量 1.06k tok` / `Usage 1.06k tok`) and a duration
+ * pill (`用时 21s` / `Ran for 21s`), so this plugin reuses those numbers instead
+ * of deriving tokens or wall time itself — but NOT their labels, which is what
+ * {@link valueOfLabel} is about. The pills are plain buttons with hashed class
+ * names, so they are located by contract position: the tail's LAST two
+ * `aria-haspopup="dialog"` buttons are exactly the usage panel and the time
+ * panel, in that order (TurnTailNodeView seats them after the branch action).
+ * Their icons tell them apart — the usage pill draws an ellipse, the time pill
+ * a circle. A pill hidden by the tail's hover-reveal keeps its text; opacity
+ * does not remove it from the DOM.
  * @param tail - one `[data-turn-tail]` element.
- * @returns the labels the tail carries, either of which may be null.
+ * @returns the values the tail carries, either of which may be null.
  */
 export function turnStatsOfTail(tail: HTMLElement): TurnStats {
   const pills = [...tail.querySelectorAll<HTMLElement>('button[aria-haspopup="dialog"]')].slice(-2)
@@ -124,8 +173,9 @@ export function turnStatsOfTail(tail: HTMLElement): TurnStats {
     // Both host labels always carry a number (a token count, a duration);
     // an icon-only button from the assistant-actions slot carries none.
     if (label === '' || !/\d/u.test(label)) continue
-    if (pill.querySelector('svg ellipse') !== null) usage = label
-    else if (pill.querySelector('svg circle') !== null) duration = label
+    const value = valueOfLabel(label)
+    if (pill.querySelector('svg ellipse') !== null) usage = value
+    else if (pill.querySelector('svg circle') !== null) duration = value
   }
   return usage === null && duration === null ? NO_TURN_STATS : { usage, duration }
 }
@@ -133,7 +183,7 @@ export function turnStatsOfTail(tail: HTMLElement): TurnStats {
 /**
  * Read every rendered turn's stats, keyed by the turn's own id.
  * @param scroller - the transcript scrollport.
- * @returns the stats of every turn tail that carries at least one label.
+ * @returns the stats of every turn tail that carries at least one value.
  */
 export function collectTurnStats(scroller: HTMLElement): Map<string, TurnStats> {
   const stats = new Map<string, TurnStats>()
