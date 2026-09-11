@@ -22,10 +22,13 @@ import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 // Declares the 'shell.overlay' slot the overlay registers into; without this
 // merge the slot name is not in SlotMap and the register below fails to compile.
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
+// Same, for the Session header's action seat the viewport strip registers into.
+import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { SettingsScope } from '@deepseek-ai/dsh-client-ui-settings/client'
 import { MessagesOverlaySlot, type MessagesOverlaySlotProps } from './overlay.tsx'
+import { ViewportMessageHud, type ViewportSessionFacts } from './hud.tsx'
 import { MessagesSettingsCard } from './settings-card.tsx'
-import { readSessionTotals, type SessionTotals } from './session-totals.ts'
+import { readSessionModel, readSessionTotals, type SessionTotals } from './session-totals.ts'
 import { publishScope } from './settings-scope-holder.ts'
 import type { MessagesConfig } from '../shared.ts'
 import { en, zh, type MessagesKey } from './locales.ts'
@@ -124,6 +127,42 @@ export function apply(ctx: ClientContext): void {
         },
       }),
     }, (props: MessagesOverlaySlotProps) => createElement(MessagesOverlaySlot, props)))
+
+    // The viewport strip: one item in the Session header's action row, not a
+    // layer of its own. It rides the header's placement, stacking and its
+    // blank-session hiding for free.
+    //
+    // `slots.inject` waits for the seat, so a composition without ui-conversation
+    // simply never registers this and nothing else is affected. It declares a
+    // locale because it prints one label of its own (`缓存命中`); everything else
+    // it shows is already localized by the host.
+    scope.slots.inject('conversation.session.header.actions', () =>
+      scope.slots.register({
+        name: 'conversation.session.header.actions',
+        id: 'session-messages-strip',
+        // After the preset label and the job list: this reads as session
+        // metadata rather than as a control beside them.
+        order: 30,
+        locale: NS,
+        inject: () => ({
+          // The session-wide half of what the strip shows. Both come from the
+          // current session's projection faces — the same read the overlay's
+          // header does. They are session-wide because that is the only
+          // granularity the client publishes: a turn's own model and cache share
+          // exist in the browser (ui-chat folds them) but only on its node data,
+          // which a third-party plugin cannot reach.
+          sessionFacts: (): ViewportSessionFacts => {
+            const current = scope.sessions.list.getSnapshot().current
+            if (current === undefined) return { model: null, cacheHitPercent: null }
+            const session = scope.sessions.binding(current)?.session
+            if (session === undefined) return { model: null, cacheHitPercent: null }
+            return {
+              model: readSessionModel(session.projections),
+              cacheHitPercent: readSessionTotals(session.projections)?.cacheHitPercent ?? null,
+            }
+          },
+        }),
+      }, ViewportMessageHud))
   })
 
   // The settings card, behind a nested inject: on a host with no

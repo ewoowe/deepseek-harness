@@ -15,3 +15,4 @@
         meta: false
         wheelInverted: false
         maxRows: 50
+        showHud: false

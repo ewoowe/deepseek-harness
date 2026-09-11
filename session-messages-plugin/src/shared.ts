@@ -28,6 +28,12 @@ export interface MessagesConfig {
   wheelInverted: boolean
   /** Maximum number of rows rendered in the overlay. */
   maxRows: number
+  /**
+   * Whether the top-center viewport strip is shown: an always-on readout of the
+   * message currently under the fold, with its clock, usage and duration. Off
+   * by default — it is an extra layer over the transcript, so it is opt-in.
+   */
+  showHud: boolean
 }
 
 /** Defaults every consumer falls back to; they mirror the Schema defaults. */
@@ -39,6 +45,7 @@ export const DEFAULT_CONFIG: MessagesConfig = {
   meta: false,
   wheelInverted: false,
   maxRows: 50,
+  showHud: false,
 }
 
 /** `globalThis` property the Node half writes the resolved configuration to. */
@@ -66,5 +73,6 @@ export function resolveConfig(value: unknown): MessagesConfig {
     meta: flag('meta') ?? DEFAULT_CONFIG.meta,
     wheelInverted: flag('wheelInverted') ?? DEFAULT_CONFIG.wheelInverted,
     maxRows: count('maxRows') ?? DEFAULT_CONFIG.maxRows,
+    showHud: flag('showHud') ?? DEFAULT_CONFIG.showHud,
   }
 }

@@ -30,10 +30,11 @@ type Draft = {
   meta?: boolean
   wheelInverted?: boolean
   maxRows?: number
+  showHud?: boolean
 }
 
 /** Field ids the card edits; iterated in render order. */
-const FIELDS = ['key', 'ctrl', 'alt', 'shift', 'meta', 'wheelInverted', 'maxRows'] as const
+const FIELDS = ['key', 'ctrl', 'alt', 'shift', 'meta', 'wheelInverted', 'maxRows', 'showHud'] as const
 type Field = typeof FIELDS[number]
 
 interface SettingsCardProps {
@@ -114,6 +115,7 @@ function fieldValue(config: MessagesConfig, field: Field): unknown {
     case 'meta': return config.meta
     case 'wheelInverted': return config.wheelInverted
     case 'maxRows': return config.maxRows
+    case 'showHud': return config.showHud
   }
 }
 
@@ -391,6 +393,19 @@ export function MessagesSettingsCard(props: SettingsCardProps): ReactNode {
             }}
             onReset={() => { void resetField('maxRows') }}
             overridden={isFieldOverridden(snapshot, 'maxRows') && draft.maxRows === undefined}
+            disabled={!writable}
+            divider
+          />
+
+          <SwitchRow
+            label={t('fieldShowHud')}
+            value={Boolean(effective('showHud'))}
+            staged={draft.showHud}
+            onChange={(next) => { stage('showHud', next) }}
+            onReset={() => { void resetField('showHud') }}
+            overridden={isFieldOverridden(snapshot, 'showHud') && draft.showHud === undefined}
+            overriddenLabel={t('overridden')}
+            resetLabel={t('reset')}
             disabled={!writable}
             divider
           />

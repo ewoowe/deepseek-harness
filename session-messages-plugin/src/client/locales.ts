@@ -35,6 +35,8 @@ export type MessagesKey =
   | 'fieldWheelDown'
   | 'fieldMaxRows'
   | 'fieldMaxRowsHint'
+  | 'fieldShowHud'
+  | 'fieldShowHudHint'
   | 'overridden'
   | 'reset'
   | 'invalidKey'
@@ -79,6 +81,8 @@ const en: Record<MessagesKey, string> = {
   fieldWheelDown: 'Scroll up selects the next row',
   fieldMaxRows: 'Maximum rows',
   fieldMaxRowsHint: 'Cap on the number of messages listed in the overlay.',
+  fieldShowHud: 'Show the viewport strip',
+  fieldShowHudHint: 'A top-center strip naming the message you are reading, with its clock, usage and duration.',
   overridden: 'Overridden',
   reset: 'Reset',
   invalidKey: 'The chord key must be a single character.',
@@ -124,6 +128,8 @@ const zh: Record<MessagesKey, string> = {
   fieldWheelDown: '向上滚动选择下一条',
   fieldMaxRows: '最大行数',
   fieldMaxRowsHint: '弹窗列表能展示多少条消息的上限。',
+  fieldShowHud: '显示视口浮条',
+  fieldShowHudHint: '顶部居中的一条，显示你正在读的消息及其时钟、用量和用时。',
   overridden: '已覆盖',
   reset: '重置',
   invalidKey: '唤出键必须是单个字符。',

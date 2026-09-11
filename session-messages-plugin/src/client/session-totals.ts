@@ -1,13 +1,22 @@
 /**
- * Session-wide totals for the overlay's header.
+ * Session-wide facts for the overlay's header and the viewport strip: the
+ * totals, and the model route the session runs.
  *
  * They ride the client session's own projection faces rather than the rendered
  * transcript. That is the same reason the message list reads the DOM and this
  * does not: a third-party plugin cannot reach `ui-chat`'s node store, but
- * `ISession.projections` is a public read face, and the two projections are
+ * `ISession.projections` is a public read face, and these projections are
  * Host-computed over the WHOLE log — paging the window in or compacting it
  * cannot change them. Reading numbers also avoids parsing formatted text
  * (a compact `1.2K`) back into the value it was printed from.
+ *
+ * Granularity is worth stating plainly, because the strip mixes two: a turn's
+ * usage and duration come from that turn's own tail pills, while everything
+ * here is SESSION-wide. Per-turn model and cache share do exist in the client
+ * (`TurnTokenUsage.routes` / `cacheReadTokens`, folded in the browser by
+ * `turn-tail.ts`) but they live only on ui-chat's node data, behind the node
+ * store a third-party plugin cannot reach — and the turn-usage dialog that
+ * renders them is only mounted while it is open.
  *
  * Formatting follows the host's own conventions so the header reads like the
  * rest of the product: the same compact token count, the same `45.2s` /
@@ -81,6 +90,34 @@ export function readSessionTotals(projections: ProjectionsFaceLike): SessionTota
     totalTokens: billedInput + (usage?.outputTokens ?? 0),
     cacheHitPercent: cacheHitPercent(usage?.cacheReadTokens ?? 0, billedInput),
   }
+}
+
+/** The `modelSelection` projection's view fields this module reads. */
+interface ModelSelectionView {
+  lastUsed?: { provider?: unknown; model?: unknown } | null
+  next?: { provider?: unknown; model?: unknown } | null
+}
+
+/**
+ * Read the model the session is running.
+ *
+ * `lastUsed` is the route the most recent request actually went out on — the
+ * honest answer to "which model produced what I am looking at". `next` is the
+ * fallback for a session that has picked a model but not sent a request yet
+ * (`next` is the projection's own `pending ?? lastUsed`, so it is never older).
+ *
+ * Only the model id is read, not a human-readable name: the display name lives
+ * in the model DIRECTORY service, which is a selection surface that lazily
+ * creates per-session state and throws for a session outside the active list —
+ * not something a read-only label should pull in.
+ * @param projections - the owning session's projection read face.
+ * @returns the model id, or null when the session records no route.
+ */
+export function readSessionModel(projections: ProjectionsFaceLike): string | null {
+  const value = projections.faceOf('modelSelection').getSnapshot() as ModelSelectionView | undefined
+  const chosen = value?.lastUsed ?? value?.next
+  const model = chosen?.model
+  return typeof model === 'string' && model !== '' ? model : null
 }
 
 /** One decimal below a hundred, whole numbers from there, as the host scales them. */

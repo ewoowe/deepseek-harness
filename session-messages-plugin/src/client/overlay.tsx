@@ -19,17 +19,20 @@
  * page in through the session face as the highlight nears the oldest loaded row.
  */
 import {
-  useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore,
+  useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState,
   type CSSProperties, type ReactNode,
 } from 'react'
 import { createPortal } from 'react-dom'
 import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
-import { CONFIG_GLOBAL, resolveConfig, type MessagesConfig } from '../shared.ts'
+import type { MessagesConfig } from '../shared.ts'
 import {
   formatCompactDuration, formatCompactTokens, type SessionTotals,
 } from './session-totals.ts'
 import type { MessagesKey } from './locales.ts'
-import { readScope, subscribeScope } from './settings-scope-holder.ts'
+import {
+  collectTurnStats, LAND_OFFSET_PX, MESSAGE_ROW_SELECTOR, scrollport, splitEntry, VISIBLE_MIN_PX,
+} from './transcript.ts'
+import { useMessagesConfig } from './use-messages-config.ts'
 
 /** One listed message. */
 export interface MessageEntry {
@@ -71,9 +74,6 @@ interface OverlayProps {
   /** Locale-bound translate function. */
   readonly t: Translate<MessagesKey>
 }
-
-/** Vertical breathing room above a landed row, matching ChatView's own jump. */
-const LAND_OFFSET_PX = 24
 
 /** Hard cap on the preview string so the line-clamp runs in O(1). */
 const MAX_PREVIEW_CHARS = 240
@@ -176,66 +176,12 @@ function matchesChord(event: KeyboardEvent, config: MessagesConfig): boolean {
     && event.metaKey === config.meta
 }
 
-/** The transcript's scrollport, or null when no conversation is mounted. */
-function scrollport(): HTMLElement | null {
-  return document.querySelector<HTMLElement>('[data-conversation-scroll]')
-}
-
-/**
- * Identify a clock label leaf. ui-chat's `formatMessageClock` (in
- * `packages/client/ui-chat/src/client/chat/message-chrome.ts`) produces three
- * families: same-day `HH:mm`; same-year `M月D日` (zh) or `Mon D[, YYYY]`
- * (en) optionally followed by `HH:mm`; and the same with a four-digit year.
- * Strict full-string match — a substring of the message text that happens to
- * contain a time-shaped fragment is intentionally NOT considered a timestamp.
- */
-const TIMESTAMP_PATTERN = /^(?:\d{1,2}:\d{2}|\d{1,2}月\d{1,2}日|\d{4}[-/\u5e74]\d{1,2}[-/\u6708]\d{1,2}\u65e5?|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}(?:,\s+\d{4})?)(?:\s+\d{1,2}:\d{2})?$/u
-
-function looksLikeTimestamp(text: string): boolean {
-  const t = text.trim()
-  if (t === '') return false
-  return TIMESTAMP_PATTERN.test(t)
-}
-
-/**
- * Split a chat row into the message text and an optional clock label.
- *
- * The IconActions time is a leaf sibling of the message bubble inside the row;
- * we identify it by content rather than by a stable selector because the
- * third-party plugin cannot import the host's hashed CSS module classes. The
- * clone-and-prune approach keeps the source row untouched so React's own
- * rendering of the transcript is unaffected.
- */
-function splitEntry(row: HTMLElement): { text: string; timestamp: string | null } {
-  const clone = row.cloneNode(true) as HTMLElement
-  let timestamp: string | null = null
-  const targets = [clone, ...clone.querySelectorAll<HTMLElement>('*')]
-  for (const el of targets) {
-    if (el.children.length > 0) continue
-    const t = (el.textContent ?? '').trim()
-    if (t === '' || !looksLikeTimestamp(t)) continue
-    if (timestamp === null) timestamp = t
-    el.remove()
-  }
-  const text = (clone.textContent ?? '').replace(/\s+/gu, ' ').trim()
-  return { text, timestamp }
-}
-
 /**
  * How close to the floor still counts as "following the newest message".
  * Mirrors ChatView's own FOLLOW_THRESHOLD: the same question, asked to decide
  * the opening highlight rather than scroll ownership.
  */
 const FOLLOW_THRESHOLD_PX = 24
-
-/**
- * How much of a row must be inside the viewport before it counts as
- * "displayed". A row that only pokes a few pixels in is geometrically inside
- * the viewport but the reader has not reached it yet — the previous message is
- * still the one they are looking at. 30 px is roughly half a row to a full
- * row on the common chat density.
- */
-const VISIBLE_MIN_PX = 30
 
 /**
  * Wheel travel that moves the highlight one row. One notch of a notched mouse
@@ -268,44 +214,6 @@ interface Collected {
 }
 
 /**
- * Read every rendered turn's usage and duration labels from its tail.
- *
- * The host owns both the numbers and their formatting: a turn's tail already
- * carries a usage pill (`消费 1.2k` / `Consumed 1.2k`) and a duration pill
- * (`用时 12.3s` / `Ran for 12.3s`), localized by ui-chat, so the overlay reuses
- * those labels instead of deriving tokens or wall time itself. The pills are
- * plain buttons with hashed class names, so they are located by contract
- * position: `[data-turn-tail]` is the turn tail, and its LAST two
- * `aria-haspopup="dialog"` buttons are exactly the usage panel and the time
- * panel, in that order (TurnTailNodeView seats them after the branch action).
- * Their icons tell them apart — the usage pill draws an ellipse, the time pill
- * a circle. A pill hidden by the tail's hover-reveal keeps its text; opacity
- * does not remove it from the DOM.
- * @param scroller - the transcript scrollport.
- * @returns one `{ usage, duration }` per turn, keyed by the turn's number.
- */
-function collectTurnStats(scroller: HTMLElement): Map<string, { usage: string | null; duration: string | null }> {
-  const stats = new Map<string, { usage: string | null; duration: string | null }>()
-  for (const tail of scroller.querySelectorAll<HTMLElement>('[data-turn-tail]')) {
-    const turn = tail.dataset.turnTail
-    if (turn === undefined) continue
-    const pills = [...tail.querySelectorAll<HTMLElement>('button[aria-haspopup="dialog"]')].slice(-2)
-    let usage: string | null = null
-    let duration: string | null = null
-    for (const pill of pills) {
-      const label = (pill.textContent ?? '').trim()
-      // Both host labels always carry a number (a token count, a duration);
-      // an icon-only button from the assistant-actions slot carries none.
-      if (label === '' || !/\d/u.test(label)) continue
-      if (pill.querySelector('svg ellipse') !== null) usage = label
-      else if (pill.querySelector('svg circle') !== null) duration = label
-    }
-    if (usage !== null || duration !== null) stats.set(turn, { usage, duration })
-  }
-  return stats
-}
-
-/**
  * Collect the current session's human messages in transcript order, marking
  * each one with whether it sits inside the transcript's scroll viewport at
  * collection time. Also reports whether the transcript is pinned to the bottom,
@@ -316,9 +224,7 @@ function collectTurnStats(scroller: HTMLElement): Map<string, { usage: string | 
 function collectMessages(): Collected {
   const scroller = scrollport()
   if (scroller === null) return { entries: [], pinnedToBottom: false }
-  const rows = scroller.querySelectorAll<HTMLElement>(
-    '[data-chat-flow-kind="user"], [data-chat-flow-kind="steering"]',
-  )
+  const rows = scroller.querySelectorAll<HTMLElement>(MESSAGE_ROW_SELECTOR)
   const turnStats = collectTurnStats(scroller)
   const view = scroller.getBoundingClientRect()
   const entries: MessageEntry[] = []
@@ -777,35 +683,6 @@ export function MessagesOverlaySlot({ loadOlder, hasMore, sessionTotals, t }: Me
       sessionTotals={sessionTotals}
       t={t}
     />
-  )
-}
-
-/**
- * Resolve the live configuration: the settings scope once it is bound, the
- * index-page global until then.
- *
- * The scope arrives through a nested inject, so the overlay usually mounts
- * before it exists. Subscribing to the holder and to the scope in turn means
- * the chord and `maxRows` follow the user's edits in Plugin configuration as
- * soon as the service appears, and a host with no settings service keeps the
- * composed value the Node half published.
- */
-function useMessagesConfig(): MessagesConfig {
-  const scope = useSyncExternalStore(subscribeScope, readScope, readScope)
-  const subscribe = useCallback(
-    (listener: () => void) => (scope === undefined ? () => {} : scope.subscribe(listener)),
-    [scope],
-  )
-  const getSnapshot = useCallback(
-    () => (scope === undefined ? undefined : scope.getSnapshot().value),
-    [scope],
-  )
-  const value = useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
-  return useMemo(
-    () => value !== undefined
-      ? resolveConfig(value)
-      : resolveConfig((globalThis as Record<string, unknown>)[CONFIG_GLOBAL]),
-    [value],
   )
 }
 

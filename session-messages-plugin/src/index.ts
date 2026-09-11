@@ -30,6 +30,7 @@ export const Config: Schema<Config> = Schema.object({
   meta: Schema.boolean().default(DEFAULT_CONFIG.meta),
   wheelInverted: Schema.boolean().default(DEFAULT_CONFIG.wheelInverted),
   maxRows: Schema.number().default(DEFAULT_CONFIG.maxRows),
+  showHud: Schema.boolean().default(DEFAULT_CONFIG.showHud),
 })
 
 /** Settings namespace owned by this plugin. */
