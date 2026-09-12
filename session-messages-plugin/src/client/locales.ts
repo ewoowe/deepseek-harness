@@ -37,6 +37,7 @@ export type MessagesKey =
   | 'sessionCacheHit'
   | 'turnUsage'
   | 'turnDuration'
+  | 'modelUnknown'
   | 'searchPlaceholder'
   | 'searchAction'
   | 'searchClear'
@@ -96,6 +97,11 @@ const en: Record<MessagesKey, string> = {
   // what the host renders, so an English UI is unchanged.
   turnUsage: 'Usage {value}',
   turnDuration: 'Ran for {value}',
+  // Shown when a turn's own model cannot be read (its events sit outside the
+  // loaded window). Deliberately NOT the session's current selection: that is a
+  // different fact, and printing it beside an older message states something
+  // false with the same confidence as the truth.
+  modelUnknown: 'Unknown model',
   // Search. The corpus is the loaded window, not the whole log — the host exposes
   // no in-session search to a client plugin (see `search.ts`) — so the count is
   // phrased as a share of what IS loaded rather than as a bare total.
@@ -158,6 +164,7 @@ const zh: Record<MessagesKey, string> = {
   sessionCacheHit: '缓存命中 {percent}%',
   turnUsage: '用量 {value}',
   turnDuration: '用时 {value}',
+  modelUnknown: '未知模型',
   searchPlaceholder: '搜索消息',
   searchAction: '搜索',
   searchClear: '清除搜索',
@@ -222,6 +229,7 @@ const ja: Record<MessagesKey, string> = {
   // rows rather than a second pair of synonyms.
   turnUsage: '使用量 {value}',
   turnDuration: '所要時間 {value}',
+  modelUnknown: '不明なモデル',
   searchPlaceholder: 'メッセージを検索',
   searchAction: '検索',
   searchClear: '検索をクリア',
@@ -287,6 +295,7 @@ const ko: Record<MessagesKey, string> = {
   // Same labels as the session pair above — see the Japanese note.
   turnUsage: '사용량 {value}',
   turnDuration: '소요 시간 {value}',
+  modelUnknown: '알 수 없는 모델',
   searchPlaceholder: '메시지 검색',
   searchAction: '검색',
   searchClear: '검색 지우기',
@@ -352,6 +361,7 @@ const es: Record<MessagesKey, string> = {
   // Same labels as the session pair above — see the Japanese note.
   turnUsage: 'Uso {value}',
   turnDuration: 'Tiempo {value}',
+  modelUnknown: 'Modelo desconocido',
   searchPlaceholder: 'Buscar mensajes',
   searchAction: 'Buscar',
   searchClear: 'Borrar la búsqueda',
@@ -412,6 +422,7 @@ const fr: Record<MessagesKey, string> = {
   // Same labels as the session pair above — see the Japanese note.
   turnUsage: 'Consommation {value}',
   turnDuration: 'Durée {value}',
+  modelUnknown: 'Modèle inconnu',
   searchPlaceholder: 'Rechercher des messages',
   searchAction: 'Rechercher',
   searchClear: 'Effacer la recherche',
@@ -470,6 +481,7 @@ const de: Record<MessagesKey, string> = {
   // Same labels as the session pair above — see the Japanese note.
   turnUsage: 'Verbrauch {value}',
   turnDuration: 'Dauer {value}',
+  modelUnknown: 'Unbekanntes Modell',
   searchPlaceholder: 'Nachrichten durchsuchen',
   searchAction: 'Suchen',
   searchClear: 'Suche löschen',

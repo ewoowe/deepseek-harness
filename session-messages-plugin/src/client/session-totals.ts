@@ -1,6 +1,6 @@
 /**
- * Session-wide facts for the overlay's header and the viewport strip: the
- * totals, and the model route the session runs.
+ * Session-wide facts for the overlay's header and the viewport strip: the totals,
+ * and the cache-hit share.
  *
  * They ride the client session's own projection faces rather than the rendered
  * transcript. That is the same reason the message list reads the DOM and this
@@ -9,6 +9,9 @@
  * Host-computed over the WHOLE log — paging the window in or compacting it
  * cannot change them. Reading numbers also avoids parsing formatted text
  * (a compact `1.2K`) back into the value it was printed from.
+ *
+ * The MODEL is not here: a strip readout belongs to a turn rather than to the
+ * session, and it comes from the session's event window instead (`turn-models.ts`).
  *
  * Granularity is worth stating plainly, because the strip mixes two: a turn's
  * usage and duration come from that turn's own tail pills, while everything
@@ -24,10 +27,11 @@
  * fold, so the tail pills stay the only source that answers "any turn, both
  * numbers" — at the price of reading formatted text rather than numbers.
  *
- * Formatting follows the host's own conventions so the header reads like the
- * rest of the product: the same compact token count, the same `45.2s` /
- * `2m42s` duration, and a cache-hit share that never rounds a partial hit up
- * to a full 100%.
+ * Formatting follows the host's own conventions so these figures read like the
+ * rest of the product: the same compact token count, the same `45.2s` / `2m42s`
+ * duration, and the host's own cache-hit format — reproduced rather than
+ * re-derived, so the strip and the composer's session pills cannot print two
+ * different numbers for one projection (see {@link formatCacheHitPercent}).
  */
 import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
 import type { MessagesKey } from './locales.ts'
@@ -44,8 +48,8 @@ export interface SessionTotals {
   readonly busyMs: number
   /** Billed input (uncached + cache read + cache write) plus output tokens. */
   readonly totalTokens: number
-  /** Cache reads as a share of billed input, or null when nothing was billed. */
-  readonly cacheHitPercent: number | null
+  /** Cache reads as a share of billed input, as display text; null when nothing was billed. */
+  readonly cacheHitPercent: string | null
 }
 
 /** The `sessionStats` projection's view fields this module reads. */
@@ -62,27 +66,88 @@ interface TokenUsageView {
   cacheWriteTokens?: number
 }
 
-/** The `modelSelection` projection's view fields this module reads. */
-interface ModelSelectionView {
-  lastUsed?: { provider?: unknown; model?: unknown } | null
-  next?: { provider?: unknown; model?: unknown } | null
+/**
+ * Display-ready cache-hit share, reproduced from the host.
+ *
+ * This is `formatCacheHitPercent` from ui-chat's `token-format.ts`, ported rather
+ * than re-derived: the strip and the composer's session pills print this same
+ * figure from this same projection, so a second implementation that rounds
+ * differently makes the product look like it disagrees with itself — `99.8%`
+ * above `99%`, both claiming to be the session's cache hit.
+ *
+ * What the host's rule buys is honesty about a near-full hit. The session prints
+ * whole percents, which would round a partial hit up to `100%`; instead of
+ * clamping the value the host spends extra decimals on it, yielding the `99.6` /
+ * `99.95` shape — a number that is both true and visibly short of a full hit.
+ * The units arithmetic is integer-only, so a tie rounds up the way a reader
+ * expects without float drift on large token counts.
+ *
+ * `displayPercentUnits` keeps the trailing `.0` off: `99` reads as a whole
+ * percent, never as `99.0`.
+ * @param cacheReadTokens - prompt tokens served from cache.
+ * @param promptTokens - billed prompt tokens (the three input buckets summed).
+ * @param decimalPlaces - ordinary precision; a near-full hit earns more.
+ * @returns the percentage text, or null when nothing was billed.
+ */
+function formatCacheHitPercent(
+  cacheReadTokens: number,
+  promptTokens: number,
+  decimalPlaces: 0 | 1 = 0,
+): string | null {
+  if (promptTokens <= 0) return null
+  const missedInputTokens = promptTokens - cacheReadTokens
+  if (missedInputTokens === 0) return '100'
+
+  const roundedUnits = roundedPercentUnits(cacheReadTokens, promptTokens, decimalPlaces)
+  const fullHitUnits = decimalPlaces === 0 ? 100 : 1_000
+  if (roundedUnits < fullHitUnits) return displayPercentUnits(roundedUnits, decimalPlaces)
+
+  let distinguishingPlaces = 1
+  let scaledDoubleGap = missedInputTokens * 200
+  const denominatorTens = Math.floor(promptTokens / 10)
+  while (scaledDoubleGap <= denominatorTens) {
+    scaledDoubleGap *= 10
+    distinguishingPlaces += 1
+  }
+  const denominatorOnes = promptTokens % 10
+  let roundedLoss = 5
+  for (let loss = 1; loss < 5; loss += 1) {
+    const factor = loss * 2 + 1
+    const threshold = factor * denominatorTens + Math.floor(factor * denominatorOnes / 10)
+    if (scaledDoubleGap <= threshold) {
+      roundedLoss = loss
+      break
+    }
+  }
+  return `99.${'9'.repeat(distinguishingPlaces - 1)}${10 - roundedLoss}`
 }
 
-/**
- * Cache-hit share of billed input, or null when there is no billed input.
- *
- * A partial hit must never print as a full one, so anything that rounds to 100
- * without every billed prompt token coming from cache is held at 99.9 — the
- * host's own rule, reached here by clamping rather than by its precision search.
- * @param cacheReadTokens - prompt tokens served from cache.
- * @param billedInputTokens - uncached + cache read + cache write prompt tokens.
- * @returns the share to print, with at most one decimal.
- */
-function cacheHitPercent(cacheReadTokens: number, billedInputTokens: number): number | null {
-  if (billedInputTokens <= 0) return null
-  if (cacheReadTokens >= billedInputTokens) return 100
-  const rounded = Math.round((cacheReadTokens / billedInputTokens) * 1_000) / 10
-  return rounded >= 100 ? 99.9 : rounded
+/** Percentage units (hundredths or tenths of a percent) with ties rounded up. */
+function roundedPercentUnits(cacheReadTokens: number, denominator: number, decimalPlaces: 0 | 1): number {
+  const unitsPerPercent = decimalPlaces === 0 ? 1 : 10
+  const scale = unitsPerPercent * 100
+  const doubledScale = scale * 2
+  const denominatorQuotient = Math.floor(denominator / doubledScale)
+  const denominatorRemainder = denominator % doubledScale
+  let lower = 0
+  let upper = scale
+  while (lower < upper) {
+    const candidate = Math.floor((lower + upper + 1) / 2)
+    const factor = candidate * 2 - 1
+    const threshold = factor * denominatorQuotient
+      + Math.ceil(factor * denominatorRemainder / doubledScale)
+    if (cacheReadTokens >= threshold) lower = candidate
+    else upper = candidate - 1
+  }
+  return lower
+}
+
+/** Units as text, with the decimal part dropped when it is zero. */
+function displayPercentUnits(units: number, decimalPlaces: 0 | 1): string {
+  if (decimalPlaces === 0) return String(units)
+  const whole = Math.floor(units / 10)
+  const tenths = units % 10
+  return tenths === 0 ? String(whole) : `${whole}.${tenths}`
 }
 
 /**
@@ -119,31 +184,34 @@ function billedInputOf(usage: TokenUsageView | undefined): number {
  * @param value - the projection's view, or undefined while the unit is absent.
  * @returns the share to print, or null.
  */
-export function cacheHitOfUsage(value: unknown): number | null {
+export function cacheHitOfUsage(value: unknown): string | null {
   const usage = value as TokenUsageView | undefined
-  return cacheHitPercent(usage?.cacheReadTokens ?? 0, billedInputOf(usage))
+  return formatCacheHitPercent(usage?.cacheReadTokens ?? 0, billedInputOf(usage))
+}
+
+/** The `TurnTokenUsage` fields this module reads. */
+interface TurnUsageView {
+  readonly cacheReadTokens?: number
+  readonly outputTokens: number
+  readonly totalTokens: number
 }
 
 /**
- * The model a session runs, from one `modelSelection` view.
+ * Cache-hit share of ONE turn, at the precision the host's own turn dialog uses.
  *
- * `lastUsed` is the route the most recent request actually went out on — the
- * honest answer to "which model produced what I am looking at". `next` is the
- * fallback for a session that has picked a model but not yet sent a request
- * (`next` is the projection's own `pending ?? lastUsed`, so it is never older).
- *
- * Only the model id is read, not a human-readable name: the display name lives in
- * the model DIRECTORY service, which is a selection surface that lazily creates
- * per-session state and throws for a session outside the active list — not
- * something a read-only label should pull in.
- * @param value - the projection's view, or undefined while the unit is absent.
- * @returns the model id, or null when no route is recorded.
+ * Same formatter as the session figure, and the same expression `TurnUsagePanel`
+ * builds it from — `totalTokens - outputTokens` is the billed prompt side — but
+ * one decimal rather than the session's none, because that is the precision the
+ * host itself chose for a single turn. Matching both the algorithm and the
+ * precision is what lets the strip and that dialog agree character for character.
+ * @param usage - a turn's folded `TurnTokenUsage`, or undefined when the turn is
+ *   still running or its evidence is incomplete.
+ * @returns the percentage text, or null when the turn carries no cache evidence.
  */
-export function modelOfSelection(value: unknown): string | null {
-  const selection = value as ModelSelectionView | undefined
-  const chosen = selection?.lastUsed ?? selection?.next
-  const model = chosen?.model
-  return typeof model === 'string' && model !== '' ? model : null
+export function turnCacheHitOf(usage: unknown): string | null {
+  const view = usage as TurnUsageView | undefined
+  if (view === undefined || view.cacheReadTokens === undefined) return null
+  return formatCacheHitPercent(view.cacheReadTokens, view.totalTokens - view.outputTokens, 1)
 }
 
 /** One decimal below a hundred, whole numbers from there, as the host scales them. */

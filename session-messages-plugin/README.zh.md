@@ -70,6 +70,8 @@ session-messages-plugin/
       index.ts                浏览器半：注册到 shell.overlay 与设置卡片两个槽位
       transcript.ts           transcript DOM 契约层（两个消费者共用的采集原语）
       search.ts               搜索：折叠匹配、命中区间、片段提取（纯函数，可单测）
+      model-names.ts          模型显示名：宿主目录 → id 的查找表（外部 store，供浮条读取）
+      turn-facts.ts           每轮事实：从事件窗口折叠「轮次 → 模型 + 缓存命中率」（用量复用宿主 deriveTurnTokenUsage）
       overlay.tsx             列表浮层组件、消息采集与跳转
       hud.tsx                 视口浮条（注册进会话标题栏的动作座位）
       use-messages-config.ts  解析当前配置（设置作用域 → 退化到页面全局）
@@ -256,22 +258,37 @@ chrome 都不是这么做的，于是看起来像贴上去的一张卡片。**�
 | 时钟 | 该条消息 | 行内 `IconActions` 的标签 |
 | 消息正文 | 该条消息 | 行内文本（剥离行尾时间戳叶子） |
 | 用量 / 用时 | **该轮** | 该轮轮尾的那两个胶囊 |
-| 模型 | **整场会话** | `modelSelection` 投影的 `lastUsed`（退化到 `next`） |
-| 缓存命中 | **整场会话** | `tokenUsage` 投影：`cacheRead / (uncachedInput + cacheRead + cacheWrite)` |
+| 模型 | **该轮** | 该轮 `assistant/message` 事件里的 `message.source`，经绑定的事件窗口折叠（`turn-models.ts`）。**显示名**再经 `remote.session.modelCatalog()` 解析成与输入框选择器一致的写法；轮次取不到时显示「未知模型」 |
+| 缓存命中 | **该轮** | 该轮的用量（宿主 `deriveTurnTokenUsage` 在事件窗口上折叠）→ `cacheRead / 计费输入`，精度对齐宿主的 per-turn 对话框（1 位小数） |
 
-后两个是会话级的——**这不是取舍，是约束**。轮次级的模型与缓存命中在客户端确实存在
-（`ui-chat` 在浏览器里用 `deriveTurnTokenUsage` 折叠出来，带 `routes[{provider,model}]`
-和 `cacheReadTokens`），而且**有公开的取法**：`conversation.chat.node` 席位的注入面提供
-`useTurnData`，占位者还能从自己的 `node.location.turn.start/end` 直接算出该轮墙钟。
-问题出在**作用域**：它只回答「你这个节点渲染的那一轮」，而本插件要的是**任意一轮**（浮条跟视口）
-和**全部轮次**（列表）；这个席位也占不得——slot 的 key 是 ui-chat 自己的 `ChatNodeKind`，
-占一个 key 会**替换**宿主的渲染器。所以这两项在这里只能用会话级口径。
+模型能按轮取到，靠的是会话自己的**事件窗口**（`binding.eventSource`）：每轮的
+`assistant/message` 事件里带 `message.source.{provider,model}`——宿主算每轮 routes 用的就是它——
+所以浮条读到哪一轮就显示哪一轮，翻回切换模型之前的消息不会再显示当前选中的模型。
+窗口没覆盖到的轮次（更早的历史）显示**未知模型**——**不用会话级 `modelSelection` 顶替**：
+那是另一个时刻的事实，填上去等于用同样肯定的语气说一件错事。
 
-口径与宿主一致：缓存命中的分母是**计费输入三桶之和**（与宿主 `StatsPills` 的
-`billedInputTokens` 相同），百分比沿用本插件页眉那套「部分命中不四舍五入成 100%」。
+**缓存命中率同样按轮取。** 用量交给宿主的 `deriveTurnTokenUsage`
+（`@deepseek-ai/dsh-token-meter/client`，ui-chat 建轮尾用的就是它）在事件窗口上折叠，
+再走宿主那份格式化（1 位小数、接近满分时加精度）。**不自己重写聚合规则**：哪些事件算数、
+流式样本与最终消息谁覆盖谁、不完整的轮次返回空——这些规则很细，自己再实现一遍，
+第一次偏差会一直隐形，直到有人比较两个界面。正在进行的轮次拿不到（宿主对该情形 fail closed），
+此时该片段不显示。
 
-模型只显示 **id**（如 `deepseek-chat`），不是展示名：展示名在模型目录 service 里，
-那是个会惰性创建 per-session 状态、并对不在活动列表里的会话抛错的**选择面**，
+轮次级数据还有另一条取法——`conversation.chat.node` 席位注入的 `useTurnData`，占位者还能从
+`node.location.turn.start/end` 算出该轮墙钟——但它只回答「你这个节点渲染的那一轮」，
+而本插件要**任意一轮**（浮条跟视口）和**全部轮次**（列表）；那个席位也占不得：
+slot 的 key 是 ui-chat 自己的 `ChatNodeKind`，占一个 key 会**替换**宿主的渲染器。
+本插件因此走事件窗口。
+
+口径与宿主一致：分母是**计费输入三桶之和**（与宿主 `StatsPills` 的 `billedInputTokens` 逐字相同），
+百分比**照搬**宿主 `token-format.ts` 的 `formatCacheHitPercent`——同一个投影、同一份算法，
+所以浮条、页眉与底部状态栏印出的数字逐字相同。宿主那条规则值得说明：部分命中接近满分时
+**不夹紧成 99.9，而是加小数位**（`99.6` / `99.95` 这种形状），既真实、又明显不是满分。
+
+模型显示的是**输入框选择器上那个展示名**（如 `DeepSeek-V4.1-Flash`），经
+`remote.session.modelCatalog()` 解析；目录里没有它时（例如模型已退役）退回原始 id，
+轮次取不到时显示「未知模型」。展示名**不从** `ctx.modelDirectories` 取：
+那是会惰性创建 per-session 状态、并对不在活动列表里的会话抛错的**选择面**，
 不该为一个只读标签拉进来。
 
 宽度上限因此是 `min(760px, 58vw)`，而不是更窄的值——**胶囊不可压缩**，
@@ -306,7 +323,16 @@ chrome 都不是这么做的，于是看起来像贴上去的一张卡片。**�
 `LAND_OFFSET_PX` 因此从 `overlay.tsx` 提到了 `transcript.ts`（两者共用的契约层）：
 跳转的落点算术和浮条的判定带宽本来就是同一件事，各写一份必然发散。
 
-要改回严格可见判定，改 `hud.tsx` 的 `rowUnderFold` 一处即可。
+**这条判定是浮条和弹窗共用的**：两个界面都要回答「读者在哪一条消息上」，此前各写一份——
+浮条用这条 sticky 带宽规则，弹窗用「至少可见 30px」✗——两者只在一种情况下分歧，而那正是最常见的：
+**一条长消息滚到只剩一小截露在顶部**时，浮条继续指着它（读者确实还在里面 ✓），
+弹窗却因为不足 30px 而跳到下一条 ✗，于是同一滚动位置两个界面指向不同消息 ✓。
+
+现在只有 `transcript.ts` 的 **`readingRow(scroller)`** 一处判定（内部调用纯函数 `pickRowUnderFold` ✓），
+浮条的 `hitOfViewport` 与弹窗的 `collectMessages` 都读它 ✓ —— **同一滚动位置必然得到同一条消息** ✓。
+弹窗保留「贴底时取最新一条」这一例外 ✓（新建会话时最后一条还没到达锚带 ✓）。
+
+要改规则，改 `transcript.ts` 的 `pickRowUnderFold` 一处即可 ✓（`fold-rule-check` 那组用例锁定它 ✓）。
 
 ### 为什么它比列表便宜
 
@@ -442,7 +468,8 @@ NFC 归一化 → 小写化 → 子串包含
 为什么不抓 DOM：这两个值不存在于任何可见文本里（会话时间只在统计弹窗内，且弹窗默认关闭），
 而读数字还省掉了“把 `1.2K` 这类紧凑文本解析回数字”这一步。格式化按宿主同一套口径：
 紧凑 token（`12.2K` / `1.2M`）、紧凑时长（`45.2s` / `2m42s`），
-且**部分命中不四舍五入成 100%**（未全命中时最高显示 99.9）。
+且缓存命中用的是宿主那份算法（见上文），**部分命中不四舍五入成 100%**——
+接近满分时加小数位，而不是夹紧。
 
 ## 配置如何从 Node 半传到浏览器
 
@@ -462,13 +489,31 @@ NFC 归一化 → 小写化 → 子串包含
   所以直接对列表元素 `addEventListener('wheel', …, { passive: false })`。
 - **客户端包必须是 CJS**：产物被包进 `window.__ModuleLoader__.load({ factory: (require) => {...} })`，
   函数体内不能出现 ESM `import`。tsdown CLI 因缺 `unrun` 起不来，改用 `build()` 编程接口并传 `config: false`。
-- **所有裸导入保持 external**：浏览器从模块表解析，打包进副本会导致 cordis / react 实例身份与外壳分裂。
+- **只有模块表认得的说明符保持 external，其余一律打包。** 模块表只解答三类东西：平台 seed
+  （`react` / `react-dom`）、已物化模块、以及已注册的包工厂（组合里各客户端包的 bundle）。
+  表里没有的包，**无论怎么声明都在运行时不可达**——`require` 会抛「missed the module table」，
+  也就是报错里说的"构建期外部化漂移"。所以是**白名单**：`react` / `react-dom` /
+  `@deepseek-ai/dsh-client-ui-primitives` 留给表（实例身份必须与外壳同一份），
+  其余（含 `@deepseek-ai/dsh-token-meter/client`）**打包进来**——打包永远能用，
+  外部化错了就在启动时炸。宿主 ui-chat 能 import 那个折叠函数，是因为它被
+  **打进了同一个 bundle**，而不是表提供了它。
+  白名单**按包名匹配而不是精确串**：JSX 转换会 import `react/jsx-runtime`，
+  把它打包进来会顺手把 React 的**开发分支**（读 `process.env.NODE_ENV`）带进浏览器 ✗。
+- **构建期有两道自检**（`assertBrowserPurity`）：产物不得出现 `process.` / `Buffer` /
+  `__dirname`，且产物里每个 `require(...)` 都必须在上面那份白名单内。两条都是真实踩过的坑
+  （「missed the module table」与「process is not defined」），而它们在构建时**完全可见**——
+  与其等到页面加载失败，不如让构建直接失败。
+- **Node 半相反：裸导入全部保持 external**，交给 Node 解析——`schemastery` 一旦被打包，
+  宿主的 Schema 就会多出第二份副本，而 Schema 身份是按引用比较的。
 
 ## 已知限制
 
 - 只列已加载窗口内的消息；更早的由打开时的填充与接近最旧一条时的预取自动翻入，没有手动按钮。
   **搜索同样只覆盖这份窗口**：命中为零时按 `Enter` 是唯一的「继续往前找」，每次一页。
+  浮条读的**每轮模型**也在其中：窗口之外的轮次显示「未知模型」。
 - 搜索不跨打开保留：每次打开清空查询并恢复完整列表（弹窗的首要职责是定位，不是筛选）。
+- 模型**显示名**取自宿主目录（`remote.session.modelCatalog()`）；组合里没有 remote 图层时，
+  浮条退回显示模型 id（如 `deepseek-flash`），其余行为不变。
 - 视口浮条只跟踪**人类消息**（`user` / `steering` 行）——插件的整个数据模型就是这类行，
   助手回答本身不是浮条的对象。读长回答时它显示的是那条回答所属的提问。
 - 消息预览取自行内文本（剥离行尾时间戳叶子），超长截断到 240 字符后再交给 CSS 省略号。

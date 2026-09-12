@@ -81,6 +81,8 @@ session-messages-plugin/
       index.ts                Browser half: registers the two slots and the settings card
       transcript.ts           the transcript DOM contract (collectors both consumers share)
       search.ts               search: folded matching, hit ranges, excerpting (pure)
+      model-names.ts          model display names: host catalog → id lookup (external store)
+      turn-facts.ts           per-turn facts: folds the event window to turn → model + cache share (usage via the host's deriveTurnTokenUsage)
       overlay.tsx             the list overlay: collection and jumping
       hud.tsx                 the viewport strip (header action seat)
       use-messages-config.ts  resolve the live config (settings scope → page global)
@@ -294,26 +296,44 @@ The capsules split by axis: "when, and with what" on the left, "what it cost" on
 | Clock | that message | the row's `IconActions` label |
 | Message text | that message | the row's text (trailing timestamp leaf stripped) |
 | Usage / duration | **that turn** | the two capsules in that turn's tail |
-| Model | **the whole session** | the `modelSelection` projection's `lastUsed` (falling back to `next`) |
-| Cache hit | **the whole session** | the `tokenUsage` projection: `cacheRead / (uncachedInput + cacheRead + cacheWrite)` |
+| Model | **that turn** | that turn's `assistant/message` event, its `message.source`, folded out of the binding's event window (`turn-models.ts`). The **display name** is then resolved through `remote.session.modelCatalog()`, so it reads exactly like the composer's picker; a turn with no readable model says **Unknown model** |
+| Cache hit | **that turn** | that turn's usage, folded by the host's `deriveTurnTokenUsage`, as `cacheRead / billed input` at the host's turn-dialog precision (one decimal) |
 
-The last two are session-wide, and **that is a constraint rather than a trade-off**. Per-turn model
-and cache share do exist in the client — `ui-chat` folds `deriveTurnTokenUsage` in the browser,
-carrying `routes[{provider,model}]` and `cacheReadTokens` — and they are **reachable**: the
-`conversation.chat.node` seat injects a `useTurnData` hook, and its occupant can derive that turn's
-wall time from `node.location.turn.start/end` too. What blocks this plugin is **scope**: the hook
-answers for the ONE turn its node renders, while the strip needs whichever turn sits under the fold
-and the list needs every turn. Nor can that seat simply be taken — its keys are ui-chat's own
-`ChatNodeKind`s, and occupying one would REPLACE ui-chat's renderer. So the two stay session-wide here.
+The per-turn model comes from the session's own **event window** (`binding.eventSource`): each turn's
+`assistant/message` event carries `message.source.{provider,model}` — the very thing the host folds
+per-turn routes from — so the strip names the model of whichever turn it lands on, and scrolling back
+to a message sent before a switch no longer shows the model selected now. A turn outside the loaded
+window says **Unknown model** instead — deliberately **not** the session-wide `modelSelection`, which
+is a fact about a different moment and would be stated with the same confidence as the truth.
 
-The figures match the host's own: the cache-hit denominator is the **sum of the three billed input
-buckets** (the same as the host's `billedInputTokens` in `StatsPills`), and the percentage reuses
-this plugin's header rule that **a partial hit is never rounded up to 100%**.
+**The cache share is per-turn too.** The usage is folded by the host's own `deriveTurnTokenUsage`
+(`@deepseek-ai/dsh-token-meter/client` — the function ui-chat builds a turn's tail with) and printed
+through the host's formatter at the host's turn-dialog precision (one decimal, extra decimals near a
+full hit). Its rules are deliberately **not** re-derived here: which events count, when a final message
+supersedes a streaming sample, and that an incomplete turn yields nothing are subtle enough that a
+second implementation would diverge invisibly until someone compared two surfaces. A turn that is
+still running has no figure yet — the host fails closed on it — so the clause is simply absent.
 
-The model is shown as an **id** (for example `deepseek-chat`), not a display name: display names
-live in the model directory service, which is a **selection surface** that lazily creates
-per-session state and throws for a session outside the active list. A read-only label should not
-pull that in.
+There is a second route to per-turn data — the `conversation.chat.node` seat injects a `useTurnData`
+hook, and its occupant can derive a turn's wall time from `node.location.turn.start/end` — but it
+answers for the ONE turn its node renders, while the strip needs whichever turn sits under the fold and
+the list needs every turn. Nor can that seat simply be taken: its keys are ui-chat's own
+`ChatNodeKind`s, and occupying one would REPLACE ui-chat's renderer. The event window is how this
+plugin gets there instead.
+
+The figures match the host's own: the denominator is the **sum of the three billed input buckets**
+(verbatim the host's `billedInputTokens` in `StatsPills`), and the percentage is a **port of the
+host's `formatCacheHitPercent`** (`token-format.ts`) — one projection, one algorithm, so the strip,
+the dialog header and the composer's pills print the same characters. That rule is worth stating: a
+near-full hit is **not clamped to 99.9**, it earns extra decimals (`99.6` / `99.95`), which is both
+true and visibly short of a full hit.
+
+The model reads as the **display name the composer's picker shows** (for example
+`DeepSeek-V4.1-Flash`), resolved through `remote.session.modelCatalog()`; a model absent from that
+catalog (a retired one) falls back to its raw id, and an unreadable turn says "Unknown model". It is
+deliberately **not** read from `ctx.modelDirectories` — a **selection surface** that lazily creates
+per-session state and throws for a session outside the active list, which a read-only label should
+not pull in.
 
 The width cap is therefore `min(760px, 58vw)` rather than something narrower — **the capsules
 cannot compress**, and a narrower cap would squeeze out the preview first, which is the very thing
@@ -351,7 +371,19 @@ reader is above the first message), it falls back to that first message.
 consume: the jump's landing arithmetic and the strip's detection band were always the same fact, and
 two copies of it were bound to diverge.
 
-To go back to a strict visible-row rule, change `rowUnderFold` in `hud.tsx` — one place.
+**Both surfaces that name a message share this rule.** They each used to answer "which message is
+the reader on" for themselves — this sticky band in the strip, an "at least 30px visible" test in the
+dialog — and the two disagreed on exactly the common case: **a long message scrolled down to its last
+few pixels**. The strip kept naming it (the reader really is still inside it) while the dialog
+disqualified it and jumped to the next message, so one scroll position produced two different answers.
+
+There is now one entry point, `readingRow(scroller)` in `transcript.ts` (over the pure
+`pickRowUnderFold`), and the strip's `hitOfViewport` and the dialog's `collectMessages` both read it:
+**one scroll position, one message**. The dialog keeps one exception — pinned to the floor it takes the
+newest row, which may not have reached the band yet in a freshly opened session.
+
+To change the rule, edit `pickRowUnderFold` in `transcript.ts` — one place, pinned by the
+`fold-rule-check` cases.
 
 ### Why it is cheaper than the list
 
@@ -510,8 +542,9 @@ projection read face (`faceOf(key).getSnapshot()`), and both keys are computed b
 Why not scrape: neither value exists in any visible text (the session time lives only inside the
 stats dialog, which is closed by default), and reading numbers also skips "parse `1.2K` back into
 the number it was printed from". Formatting follows the host's conventions: compact tokens
-(`12.2K` / `1.2M`), compact durations (`45.2s` / `2m42s`), and **a partial hit never rounds up to
-100%** (it tops out at 99.9 while the hit is not total).
+(`12.2K` / `1.2M`), compact durations (`45.2s` / `2m42s`), and the host's own cache-hit format (the
+port described above), where **a partial hit never rounds up to 100%** — a near-full hit gains
+decimals instead of being clamped.
 
 ## How the config reaches the browser
 
@@ -535,17 +568,39 @@ half reads that global and falls back to the same defaults when it is absent.
   `window.__ModuleLoader__.load({ factory: (require) => {...} })`, whose body cannot contain an ESM
   `import`. tsdown's CLI cannot start here (its config loader wants `unrun`), so the build uses the
   programmatic `build()` API with `config: false`.
-- **Every bare import stays external**: the browser resolves them from the module table, and
-  bundling a copy would split the identity of cordis / react from the shell's instances.
+- **Only specifiers the module table knows stay external; everything else is bundled.** The table
+  answers exactly three things: platform seeds (`react` / `react-dom`), already-materialized modules,
+  and registered package factories (the composition's own client bundles). A package outside that set
+  is unreachable at runtime **however it is declared** — `require` throws "missed the module table",
+  which the loader itself calls a build-time externals drift. Hence a **whitelist**: `react` /
+  `react-dom` / `@deepseek-ai/dsh-client-ui-primitives` stay external (instance identity has to match
+  the shell's), and everything else — `@deepseek-ai/dsh-token-meter/client` included — is bundled,
+  because bundling always works while externalizing wrongly fails at boot. The host's own ui-chat can
+  import that fold because it is **bundled into the same bundle**, not because the table serves it.
+  The whitelist matches by PACKAGE, not by exact specifier: the JSX transform imports
+  `react/jsx-runtime`, and bundling that drags React's **development branch** (which reads
+  `process.env.NODE_ENV`) into the browser.
+- **The build asserts browser purity** (`assertBrowserPurity`): the artifact must not mention
+  `process.` / `Buffer` / `__dirname`, and every `require(...)` in it must be one of the whitelisted
+  specifiers. Both are failures that already happened here — "missed the module table" and "process is
+  not defined" — and both are plainly visible in the finished artifact, so the build fails instead of
+  the page.
+- **The Node half is the opposite: bare imports all stay external** and Node resolves them —
+  bundling `schemastery` would give the host's Schema a second copy, and schema identity is compared
+  by reference.
 
 ## Known limitations
 
 - Only the loaded window can be listed; older messages are paged in automatically by the fill on
   open and the prefetch near the oldest row. There is no manual button.
   **Search covers that same window**: with no hit on screen, `Enter` is the only way further back,
-  one page at a time.
+  one page at a time. The strip's **per-turn model** is bounded by it too: a turn outside the window
+  reads "Unknown model".
 - Search does not survive an open: the query is cleared and the full list restored each time (the
   dialog's first job is position, not filtering).
+- The model **display name** comes from the host catalog (`remote.session.modelCatalog()`); in a
+  composition without the remote layer the strip falls back to the model id (`deepseek-flash`).
+  Nothing else changes.
 - The viewport strip only tracks **human messages** (`user` / `steering` rows) — that is the
   plugin's whole data model, and an assistant answer is not its subject. While reading a long answer
   it names the question that answer belongs to.

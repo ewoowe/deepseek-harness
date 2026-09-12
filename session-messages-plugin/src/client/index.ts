@@ -25,10 +25,15 @@ import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 // Same, for the Session header's action seat the viewport strip registers into.
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { SettingsScope } from '@deepseek-ai/dsh-client-ui-settings/client'
+// The catalog shape the model names are read from; `remote.session.modelCatalog`
+// returns it, and its `groups[].models[].name` is the label the composer shows.
+import type { ModelCatalog } from '@deepseek-ai/dsh-api-session-controller/types'
 import { MessagesOverlaySlot, type MessagesOverlaySlotProps } from './overlay.tsx'
-import { ViewportMessageHud } from './hud.tsx'
+import { ViewportMessageHud, type ViewportMessageHudProps } from './hud.tsx'
 import { MessagesSettingsCard } from './settings-card.tsx'
 import { readSessionTotals, type SessionTotals } from './session-totals.ts'
+import { publishModelNames } from './model-names.ts'
+import { turnFactsReader, type TurnFacts } from './turn-facts.ts'
 import { publishScope } from './settings-scope-holder.ts'
 import type { MessagesConfig } from '../shared.ts'
 import { en, NS, PACK_LOCALES, zh, type MessagesKey } from './locales.ts'
@@ -106,6 +111,32 @@ export function apply(ctx: ClientContext): void {
     // locale switch without re-registering.
     const t = scope.locale.bind(NS)
 
+    // Model display names for the strip, injected separately because `remote` is
+    // an EXTRA dependency: a composition without the remote layer must still get
+    // both surfaces, and it does — the strip simply keeps printing model ids.
+    //
+    // Loaded once per registration rather than subscribed. The catalog is
+    // deployment-wide and takes no session, which is exactly what makes it
+    // readable here at all (see `model-names.ts` for why the selection service is
+    // not), so one fetch answers every session; the strip re-renders when it
+    // lands because the lookup is an external store.
+    scope.inject(['remote', 'remote.session'], (remoteScope: ClientContext) => {
+      const names = new Map<string, string>()
+      remoteScope.effect(() => publishModelNames(
+        (provider, model) => names.get(`${provider}/${model}`) ?? null,
+      ))
+      remoteScope.effect(() => {
+        let live = true
+        void remoteScope.remote.session.modelCatalog().then((response) => {
+          if (!live || !response.ok) return
+          for (const group of (response.value as ModelCatalog).groups) {
+            for (const model of group.models) names.set(`${group.id}/${model.id}`, model.name)
+          }
+        }).catch(() => undefined)
+        return () => { live = false }
+      }, 'session-messages: model names')
+    })
+
     // The overlay needs only `sessions`; it reads its own configuration from
     // the settings scope through the holder, falling back to the index-page
     // global until that scope is bound.
@@ -161,7 +192,19 @@ export function apply(ctx: ClientContext): void {
         // metadata rather than as a control beside them.
         order: 30,
         locale: NS,
-      }, ViewportMessageHud))
+        // What the strip cannot read for itself: the facts of the turn it is
+        // annotating. Both live in the session's event window rather than in a
+        // projection (see `turn-facts.ts`), and they come back from one memoised
+        // fold — the strip asks once per animation frame.
+        inject: () => ({
+          turnFactsOf: (turn: number | undefined): TurnFacts | null => {
+            const current = scope.sessions.list.getSnapshot().current
+            if (current === undefined) return null
+            const source = scope.sessions.binding(current)?.eventSource
+            return source === undefined ? null : turnFactsReader(source)(turn)
+          },
+        }),
+      }, (props: ViewportMessageHudProps) => createElement(ViewportMessageHud, props)))
   })
 
   // The settings card, behind a nested inject: on a host with no

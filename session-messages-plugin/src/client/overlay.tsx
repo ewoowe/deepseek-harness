@@ -30,7 +30,7 @@ import {
 } from './session-totals.ts'
 import type { MessagesKey } from './locales.ts'
 import {
-  collectTurnStats, LAND_OFFSET_PX, MESSAGE_ROW_SELECTOR, scrollport, splitEntry, VISIBLE_MIN_PX,
+  collectTurnStats, LAND_OFFSET_PX, MESSAGE_ROW_SELECTOR, readingRow, rowKeyOf, scrollport, splitEntry,
 } from './transcript.ts'
 import {
   highlight, isBlankQuery, matchesEntry, matchRanges, nfc, type MatchRange,
@@ -49,8 +49,6 @@ export interface MessageEntry {
   readonly usage: string | null
   /** Duration value of this message's turn (`21s`); null when the turn carries none. */
   readonly duration: string | null
-  /** Whether the row sat inside the transcript's scroll viewport when collected. */
-  readonly visible: boolean
 }
 
 /** Props the slot hands the component: standard shares plus the inject face. */
@@ -212,8 +210,8 @@ const MAX_NO_PROGRESS = 3
 interface Collected {
   /** One entry per rendered user message row, in transcript order. */
   readonly entries: MessageEntry[]
-  /** Whether the transcript sat pinned to its floor, i.e. the reader is on the newest message. */
-  readonly pinnedToBottom: boolean
+  /** The message the reader is on: its key, or null when none can be read. */
+  readonly readingId: string | null
 }
 
 /**
@@ -226,37 +224,34 @@ interface Collected {
  */
 function collectMessages(): Collected {
   const scroller = scrollport()
-  if (scroller === null) return { entries: [], pinnedToBottom: false }
-  const rows = scroller.querySelectorAll<HTMLElement>(MESSAGE_ROW_SELECTOR)
+  if (scroller === null) return { entries: [], readingId: null }
   const turnStats = collectTurnStats(scroller)
-  const view = scroller.getBoundingClientRect()
   const entries: MessageEntry[] = []
-  for (const row of rows) {
+  for (const row of scroller.querySelectorAll<HTMLElement>(MESSAGE_ROW_SELECTOR)) {
     if (row.hidden) continue
-    const key = row.dataset.chatAnchorKey ?? row.dataset.chatFlowKey
-    if (key === undefined) continue
+    const key = rowKeyOf(row)
+    if (key === null) continue
     const { text, timestamp } = splitEntry(row)
     const stats = turnStats.get(row.dataset.chatTurn ?? '')
-    const box = row.getBoundingClientRect()
-    // A row that only pokes a few pixels into the viewport is geometrically
-    // inside it but the reader has not yet reached it — the previous message
-    // is still the one they're looking at. Require a meaningful slice
-    // (≈ half a row to a full row) before treating the row as "displayed".
-    const visibleTop = Math.max(box.top, view.top)
-    const visibleBottom = Math.min(box.bottom, view.bottom)
-    const visibleHeight = Math.max(0, visibleBottom - visibleTop)
     entries.push({
       id: key,
       text: text === '' ? '—' : text,
       timestamp,
       usage: stats?.usage ?? null,
       duration: stats?.duration ?? null,
-      visible: visibleHeight >= VISIBLE_MIN_PX,
     })
   }
+  // The opening highlight comes from the SAME rule the viewport strip reads with
+  // (`readingRow`), so one scroll position yields one message on both surfaces.
+  // Pinned to the floor the newest message is the answer even before it reaches
+  // the band, which is the state a freshly opened session is in.
   const pinnedToBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight
     <= FOLLOW_THRESHOLD_PX
-  return { entries, pinnedToBottom }
+  const reading = readingRow(scroller)
+  return {
+    entries,
+    readingId: pinnedToBottom ? (entries.at(-1)?.id ?? null) : (reading?.key ?? null),
+  }
 }
 
 /** Resolve one listed message back to its rendered row. */
@@ -458,7 +453,7 @@ function ListHeader({ totals, count, matches, t }: {
           {totals.cacheHitPercent !== null && (
             <>
               <span style={SEP_STYLE} aria-hidden="true">·</span>
-              {t('sessionCacheHit', { percent: String(totals.cacheHitPercent) })}
+              {t('sessionCacheHit', { percent: totals.cacheHitPercent })}
             </>
           )}
         </span>
@@ -1058,12 +1053,10 @@ export function MessagesOverlay({ config, loadOlder, hasMore, sessionTotals, t }
   // reading from the top edge of their viewport downward, so the first visible
   // row is the one to start from.
   const refresh = useCallback(() => {
-    const { entries: next, pinnedToBottom } = collectMessages()
+    const { entries: next, readingId } = collectMessages()
     applyEntries(next)
     syncTotals()
-    const firstVisible = next.findIndex(entry => entry.visible)
-    const target = pinnedToBottom ? Math.max(0, next.length - 1) : Math.max(0, firstVisible)
-    setActiveId(next[target]?.id ?? null)
+    setActiveId(readingId)
   }, [applyEntries, syncTotals])
 
   /**

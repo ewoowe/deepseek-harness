@@ -30,25 +30,40 @@ import { Tag } from '@deepseek-ai/dsh-client-ui-primitives'
 // Type-only merge: pulls in the session standard props (`useProjection`) the
 // component below destructures off `PropsRuntime`.
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
-import {
-  LAND_OFFSET_PX, MESSAGE_ROW_SELECTOR, scrollport, splitEntry, turnStatsOfTurn,
-} from './transcript.ts'
+import { readingRow, scrollport, splitEntry, turnStatsOfTurn } from './transcript.ts'
 import { NS } from './locales.ts'
-import { cacheHitOfUsage, modelOfSelection } from './session-totals.ts'
+import type { TurnFacts } from './turn-facts.ts'
+import { useModelNameLookup } from './model-names.ts'
 import { useMessagesConfig } from './use-messages-config.ts'
 
 /**
  * Props the header seat hands the component.
  *
  * `PropsRuntime` carries the seat's own shares plus the SESSION standard props —
- * `sessionId`, `useSession` and `useProjection`. Reading the projections through
- * `useProjection` rather than through an injected face is what keeps the model
- * and the cache share from going missing: that read is reactive, so a field
- * appears the moment the Host publishes it, where a poll could return empty
- * simply because it ran before the session binding existed.
+ * `sessionId`, `useSession` and `useProjection`. The strip needs none of them:
+ * every figure it prints beside the message belongs to that message's turn, and
+ * those arrive through the injected lookup, so there is no projection read here
+ * that could come back empty before the session binding existed.
  */
 export type ViewportMessageHudProps =
-  PropsRuntime<'conversation.session.header.actions'> & PropsLocale<typeof NS>
+  PropsRuntime<'conversation.session.header.actions'> & PropsLocale<typeof NS> & ViewportMessageHudInjected
+
+/**
+ * The face this plugin injects into its own strip registration.
+ *
+ * Declared rather than inferred from the injected object, the way the overlay's
+ * props are: the two are checked against each other where the strip is
+ * registered, which is where a drift would surface.
+ */
+export interface ViewportMessageHudInjected {
+  /**
+   * The facts of the given turn — the model it ran and its own cache share —
+   * folded from the session's loaded event window. Null when that window does not
+   * reach the turn, which the strip reports rather than filling in with a
+   * session-wide figure about a different moment.
+   */
+  readonly turnFactsOf: (turn: number | undefined) => TurnFacts | null
+}
 
 /** What the strip renders from the transcript. */
 interface ViewportReading {
@@ -60,6 +75,8 @@ interface ViewportReading {
   readonly usage: string | null
   /** Duration pill label of the row's turn, null when the turn carries none. */
   readonly duration: string | null
+  /** The row's turn, for the per-turn model lookup; undefined when unreadable. */
+  readonly turn: number | undefined
 }
 
 /** The row the reader is on, with the stats that do not need a clone. */
@@ -69,6 +86,8 @@ interface ViewportHit {
   readonly key: string
   readonly usage: string | null
   readonly duration: string | null
+  /** The row's turn, for the per-turn model lookup; undefined when unreadable. */
+  readonly turn: number | undefined
 }
 
 /**
@@ -98,69 +117,34 @@ const MAX_HUD_LINES = 3
 const HUD_REFRESH_MS = 1_000
 
 /**
- * How far below the viewport's top edge a row may start and still count as the
- * one the reader is on.
- *
- * A jump lands its target exactly `LAND_OFFSET_PX` below the fold — that is the
- * breathing room {@link LAND_OFFSET_PX} exists to leave — so a strict "has
- * crossed the fold" test named the row ABOVE the one just jumped to, and the
- * strip trailed a message behind after every jump. The band is that offset plus
- * a couple of pixels of sub-pixel slack: a landed row measures 24.0000…, and a
- * bare `<` would drop it.
- *
- * Widening the fold also makes the strip flip to the next message a touch
- * earlier while scrolling, which is the direction it wants to err in anyway.
- */
-const FOLD_BAND_PX = LAND_OFFSET_PX + 2
-
-/**
- * The row the reader is currently on.
- *
- * "Sticky" rather than strictly geometric: it is the LAST row that has reached
- * the top band of the viewport, not the first row still on screen. A user
- * message is one line and its answer can be screens tall, so a strictly-visible
- * rule would blank the strip for most of every answer — which reads as broken
- * rather than as absent. Sticky keeps naming the message you are reading until
- * the next one reaches the band, the way a section header does.
- *
- * Rows are in transcript order, so the first row starting at or below the band
- * ends the scan: nothing after it can be above it.
- * @param scroller - the transcript scrollport.
- * @returns the row, or null when the transcript holds no human message.
- */
-function rowUnderFold(scroller: HTMLElement): HTMLElement | null {
-  const fold = scroller.getBoundingClientRect().top + FOLD_BAND_PX
-  let reached: HTMLElement | null = null
-  let first: HTMLElement | null = null
-  for (const row of scroller.querySelectorAll<HTMLElement>(MESSAGE_ROW_SELECTOR)) {
-    if (row.hidden) continue
-    if (first === null) first = row
-    if (row.getBoundingClientRect().top >= fold) break
-    reached = row
-  }
-  // `reached` is null only while every row still starts below the band — i.e.
-  // the reader is above the first message, which is then the right answer.
-  return reached ?? first
-}
-
-/**
  * Resolve the row under the fold and the stats that need no cloning.
+ *
+ * The row comes from {@link readingRow}, the same rule the dialog uses for its
+ * opening highlight — one answer to "which message is the reader on", so the two
+ * surfaces cannot point at different messages for one scroll position.
  * @returns the hit, or null when no conversation or no human message is present.
  */
 function hitOfViewport(): ViewportHit | null {
   const scroller = scrollport()
   if (scroller === null) return null
-  const row = rowUnderFold(scroller)
-  if (row === null) return null
-  const stats = turnStatsOfTurn(scroller, row.dataset.chatTurn)
-  return { row, key: row.dataset.chatAnchorKey ?? '', usage: stats.usage, duration: stats.duration }
+  const reading = readingRow(scroller)
+  if (reading === null) return null
+  const stats = turnStatsOfTurn(scroller, reading.row.dataset.chatTurn)
+  const turn = Number(reading.row.dataset.chatTurn)
+  return {
+    row: reading.row,
+    key: reading.key,
+    usage: stats.usage,
+    duration: stats.duration,
+    turn: Number.isInteger(turn) ? turn : undefined,
+  }
 }
 
 /** True when two consecutive readings would render identically. */
 function sameReading(a: ViewportReading | null, b: ViewportReading | null): boolean {
   if (a === null || b === null) return a === b
   return a.text === b.text && a.timestamp === b.timestamp
-    && a.usage === b.usage && a.duration === b.duration
+    && a.usage === b.usage && a.duration === b.duration && a.turn === b.turn
 }
 
 /**
@@ -215,15 +199,14 @@ function placeStrip(node: HTMLElement): void {
  * @param props - the injected session facts and the locale seat.
  * @returns the strip, or null while disabled or with no message to name.
  */
-export function ViewportMessageHud({ useProjection, t }: ViewportMessageHudProps): ReactNode {
+export function ViewportMessageHud({ turnFactsOf, t }: ViewportMessageHudProps): ReactNode {
   const config = useMessagesConfig()
   const enabled = config.showHud
-  // Reactive, session-scoped reads. See the props type above for why these are
-  // not polled through an injected face.
-  const selection = useProjection('modelSelection')
-  const usage = useProjection('tokenUsage')
-  const model = modelOfSelection(selection)
-  const cacheHitPercent = cacheHitOfUsage(usage)
+  /**
+   * The name the composer's picker would show, so the strip and the composer
+   * cannot read as two different choices; the bare id until a catalog lands.
+   */
+  const nameOf = useModelNameLookup()
   const [reading, setReading] = useState<ViewportReading | null>(null)
   /**
    * The split of the last row read, kept across frames. Splitting clones the
@@ -261,7 +244,11 @@ export function ViewportMessageHud({ useProjection, t }: ViewportMessageHudProps
       }
       const cached = splitRef.current
       let split: { text: string; timestamp: string | null }
-      if (cached !== null && cached.key === hit.key) {
+      // Only a row with an identity may use the cache: a row the transcript did
+      // not key would collide with every other such row on `''`, and the strip
+      // would keep printing the first one's text while the reader scrolls past
+      // all of them.
+      if (cached !== null && hit.key !== '' && cached.key === hit.key) {
         split = cached
       } else {
         split = splitEntry(hit.row)
@@ -272,6 +259,7 @@ export function ViewportMessageHud({ useProjection, t }: ViewportMessageHudProps
         timestamp: split.timestamp,
         usage: hit.usage,
         duration: hit.duration,
+        turn: hit.turn,
       }
       // A new object every frame would re-render the strip on every animation
       // frame of a scroll; handing React the same reference bails out instead.
@@ -310,10 +298,18 @@ export function ViewportMessageHud({ useProjection, t }: ViewportMessageHudProps
   // the two numbers come from the turn tail, but their labels are this plugin's
   // `turnUsage` / `turnDuration`, since the host's own pill label stays English
   // under any language-pack locale.
+  // Both figures belong to THIS turn. Never the session's current selection nor
+  // its session-wide cache share: those are facts about a different moment, and
+  // printing them beside an older message states them with the same confidence as
+  // the truth.
+  const facts = turnFactsOf(reading.turn)
+  const route = facts === null ? null : facts.route
+  const model = route === null
+    ? t('modelUnknown')
+    : nameOf(route.provider, route.model) ?? route.model
   const context = [reading.timestamp, model].filter(value => value !== null).join(' · ')
-  const cacheHit = cacheHitPercent === null
-    ? null
-    : t('sessionCacheHit', { percent: String(cacheHitPercent) })
+  const cacheHitText = facts === null ? null : facts.cacheHit
+  const cacheHit = cacheHitText === null ? null : t('sessionCacheHit', { percent: cacheHitText })
   const costs = [
     reading.usage === null ? null : t('turnUsage', { value: reading.usage }),
     reading.duration === null ? null : t('turnDuration', { value: reading.duration }),
