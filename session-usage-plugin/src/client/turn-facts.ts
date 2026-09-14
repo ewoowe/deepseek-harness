@@ -158,7 +158,10 @@ function routeFromMessage(events: readonly SessionEvent[]): ModelRoute | null {
 }
 
 /**
- * Fold one loaded event window into per-turn facts.
+ * Group one loaded event window into per-turn slices, prompts included.
+ *
+ * (The type above and the function below are one idea; the doc lives here so it
+ * sits next to the rules it explains.)
  *
  * The usage half is NOT folded here. It comes from `deriveTurnTokenUsage`, the
  * host's own browser-safe fold (`@deepseek-ai/dsh-token-meter/client`), which is
@@ -183,8 +186,31 @@ function routeFromMessage(events: readonly SessionEvent[]): ModelRoute | null {
  * @returns the facts per slice, keyed by the turn's start seq; slices with no
  *   evidence of their own are absent.
  */
-export function foldTurnFacts(entries: readonly SessionEventLikeEntry[]): ReadonlyMap<number, TurnFacts> {
-  const byTurn = new Map<number, SessionEvent[]>()
+/** One pass over the window: each turn's events, and the prompt that opened it. */
+interface Scan {
+  /** The turns' slices, keyed by the `turn/start` seq that identifies them. */
+  readonly slices: ReadonlyMap<number, SessionEvent[]>
+  /** Each slice's prompt, or null when it never carried one. */
+  readonly prompts: ReadonlyMap<number, string | null>
+}
+
+/**
+ * Group a window into per-turn slices, claiming each prompt for its own turn.
+ *
+ * Split out of {@link foldTurnFacts} when export arrived and needed the same two
+ * things: the export path asks for a turn's raw events and its full prompt, which
+ * the facts themselves deliberately do not carry. One implementation, two
+ * consumers — the alternative is the exact drift this project keeps finding in
+ * hindsight, where a grouping rule exists twice and only one of them was updated.
+ *
+ * The rules below are the load-bearing part, and they were each measured; see
+ * {@link foldTurnFacts} for why the prompt is claimed rather than pushed, and why
+ * slices are keyed by seq.
+ * @param entries - one `SessionEventWindow['entries']`.
+ * @returns the slices and their prompts.
+ */
+function scan(entries: readonly SessionEventLikeEntry[]): Scan {
+  const slices = new Map<number, SessionEvent[]>()
   const prompts = new Map<number, string | null>()
   let pendingPrompt: string | null = null
   let current: number | null = null
@@ -225,22 +251,38 @@ export function foldTurnFacts(entries: readonly SessionEventLikeEntry[]): Readon
       // The turn's own start belongs IN its slice: the usage fold validates the
       // lifecycle and fails closed for a window that does not open with it, so
       // dropping this event would make every turn's usage silently unknown.
-      byTurn.set(current, [event])
+      slices.set(current, [event])
       prompts.set(current, pendingPrompt)
       pendingPrompt = null
       continue
     }
     if (current === null) continue
-    byTurn.get(current)?.push(event)
+    slices.get(current)?.push(event)
     // The turn's window CLOSES at its own end. The usage fold fails closed for
     // anything it sees after `turn/end`, and what follows belongs to the next turn
     // anyway — a prompt is appended BEFORE that turn's `turn/start`, so a slice
     // that ran until the next start would swallow it and invalidate the turn.
     if (event.type === 'turn/end') current = null
   }
+  return { slices, prompts }
+}
 
+/**
+ * Fold one loaded event window into per-turn facts.
+ *
+ * Everything about a slice's boundaries, identity and prompt is settled by
+ * {@link scan}; this half adds the usage fold, the route, the wall span and the
+ * prompt. It deliberately does NOT carry the raw events or the reply texts: those
+ * are what the export path reads, and keeping them here would hold the whole
+ * transcript in memory for a table that never shows a word of it.
+ * @param entries - one `SessionEventWindow['entries']`.
+ * @returns the facts per slice, keyed by the turn's start seq; slices with no
+ *   evidence of their own are absent.
+ */
+export function foldTurnFacts(entries: readonly SessionEventLikeEntry[]): ReadonlyMap<number, TurnFacts> {
+  const { slices, prompts } = scan(entries)
   const facts = new Map<number, TurnFacts>()
-  for (const [key, events] of byTurn) {
+  for (const [key, events] of slices) {
     const usage = deriveTurnTokenUsage(events) ?? null
     // The slice opens with `turn/start` and closes with `turn/end`, so the span is
     // the two ends' own timestamps — no clock is read here.
@@ -274,6 +316,79 @@ export function foldTurnFacts(entries: readonly SessionEventLikeEntry[]): Readon
     })
   }
   return facts
+}
+
+/** One turn's own material, for export: what it said, and what was said back. */
+export interface TurnSource {
+  /** The turn's identity: the seq of its own `turn/start`. */
+  readonly seq: number
+  /** The turn's raw events, `turn/start` to `turn/end` inclusive. */
+  readonly events: readonly SessionEvent[]
+  /** The prompt that opened it, whole, or null when it never carried one. */
+  readonly prompt: string | null
+  /** Every assistant message's text, in order — one per step of the turn. */
+  readonly responses: readonly string[]
+}
+
+/**
+ * The turns' own material, for export.
+ *
+ * A separate read from {@link foldTurnFacts} on purpose. The table wants numbers
+ * and never a word of prose; the export wants the prose and, for its raw form,
+ * the events themselves. Folding them into one structure would make every render
+ * pay for data only a click ever reads.
+ *
+ * The prompt here is the WHOLE prompt — the table's row shows a truncated preview,
+ * and truncation is a view concern that lives in the table, so a reader who asks
+ * for the conversation gets the conversation rather than what fitted in a cell.
+ * @param entries - one `SessionEventWindow['entries']`.
+ * @returns the sources per turn, keyed by the turn's start seq.
+ */
+export function turnSourcesOf(entries: readonly SessionEventLikeEntry[]): ReadonlyMap<number, TurnSource> {
+  const { slices, prompts } = scan(entries)
+  const sources = new Map<number, TurnSource>()
+  for (const [key, events] of slices) {
+    sources.set(key, {
+      seq: key,
+      events,
+      prompt: prompts.get(key) ?? null,
+      responses: responsesOf(events),
+    })
+  }
+  return sources
+}
+
+/** Every assistant reply in one slice, in order; non-text blocks are skipped. */
+function responsesOf(events: readonly SessionEvent[]): readonly string[] {
+  const responses: string[] = []
+  for (const event of events) {
+    if (event.type !== 'assistant/message') continue
+    const text = assistantTextOf(event.data)
+    if (text !== '') responses.push(text)
+  }
+  return responses
+}
+
+/**
+ * The text one assistant message carries, its text blocks concatenated in order.
+ *
+ * Narrowed by hand rather than through `AssistantMessageData`: that type declares
+ * only the `source` this module reads elsewhere, and the message body is wire
+ * data here — the same treatment `ui-chat` gives the same payload.
+ */
+function assistantTextOf(data: unknown): string {
+  const content = (data as { message?: { content?: unknown } }).message?.content
+  if (!Array.isArray(content)) return ''
+  let text = ''
+  for (const block of content) {
+    const typed = block as { type?: unknown; text?: unknown }
+    if (typed.type !== 'text' || typeof typed.text !== 'string') continue
+    // Streamed fragments arrive as separate blocks and are meant to be read as
+    // one string; inserting anything between them would invent spacing the model
+    // never sent.
+    text += typed.text
+  }
+  return text
 }
 
 /**
@@ -320,4 +435,18 @@ export function turnFactsOf(source: SessionEventSource): () => ReadonlyMap<numbe
   const fold = memoisedFold(source)
   folds.set(source, fold)
   return fold
+}
+
+/**
+ * Every turn's own material for one session binding — the export path's read.
+ *
+ * Deliberately NOT memoised, unlike {@link turnFactsOf}. This is read only when a
+ * reader exports, and caching a transcript's worth of events for the life of a
+ * binding would trade real memory for a cost no render ever pays; re-scanning on
+ * the click is the cheap side of that trade.
+ * @param source - the binding's event source.
+ * @returns the sources per turn, keyed by the turn's start seq.
+ */
+export function turnSourcesFor(source: SessionEventSource): ReadonlyMap<number, TurnSource> {
+  return turnSourcesOf(source.getSnapshot().entries)
 }

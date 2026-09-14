@@ -52,6 +52,18 @@ export type MessagesKey =
   | 'rangeDays3'
   | 'rangeDays7'
   | 'rangeGap'
+  | 'loadRange'
+  | 'loadRangeHint'
+  // Exports: four buttons, and the labels a Markdown transcript needs.
+  | 'exportCsv'
+  | 'exportJson'
+  | 'exportMd'
+  | 'exportJsonl'
+  | 'transcriptTitle'
+  | 'sessionLabel'
+  | 'exportedAt'
+  | 'promptLabel'
+  | 'responseLabel'
   | 'rangeCustom'
   | 'rangeFrom'
   | 'rangeTo'
@@ -102,6 +114,17 @@ export const zh: Record<MessagesKey, string> = {
   rangeDays3: '3 天',
   rangeDays7: '7 天',
   rangeGap: '· 更早的轮次还没载入',
+  exportCsv: '统计 CSV',
+  exportJson: '统计 JSON',
+  exportMd: '对话 MD',
+  exportJsonl: '对话 JSONL',
+  transcriptTitle: '对话记录',
+  sessionLabel: '会话',
+  exportedAt: '导出时间',
+  promptLabel: '问',
+  responseLabel: '答',
+  loadRange: '载入范围内更早的历史',
+  loadRangeHint: '逐页把更早的轮次载入，直到覆盖所选时间段的起点。载入的是消息本体，宿主无法卸载——载进来就一直留着，只能靠刷新页面回到较短的窗口。',
   rangeCustom: '自定义',
   rangeFrom: '起始时间',
   rangeTo: '至',
@@ -151,6 +174,17 @@ export const en: Record<MessagesKey, string> = {
   rangeDays3: '3 days',
   rangeDays7: '7 days',
   rangeGap: '· older turns are not loaded yet',
+  exportCsv: 'Stats CSV',
+  exportJson: 'Stats JSON',
+  exportMd: 'Chat MD',
+  exportJsonl: 'Chat JSONL',
+  transcriptTitle: 'Conversation',
+  sessionLabel: 'Session',
+  exportedAt: 'Exported',
+  promptLabel: 'Prompt',
+  responseLabel: 'Response',
+  loadRange: 'Load the older turns in this range',
+  loadRangeHint: 'Pages older turns in until the window covers the start of the chosen span. What arrives is message bodies, and the host cannot unload them — they stay loaded, and only a page reload returns to a shorter window.',
   rangeCustom: 'Custom',
   rangeFrom: 'From',
   rangeTo: 'to',

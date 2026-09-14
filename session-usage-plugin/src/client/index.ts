@@ -23,7 +23,7 @@ import { UsageView, type UsageViewInjected, type UsageViewProps } from './UsageV
 import { en, NS, zh } from './locales.ts'
 import { publishModelNames } from './model-names.ts'
 import { readSessionTotals, type SessionTotals } from './format.ts'
-import { turnFactsOf, type TurnFacts } from './turn-facts.ts'
+import { turnFactsOf, turnSourcesFor, type TurnFacts, type TurnSource } from './turn-facts.ts'
 
 /** Cordis context with this plugin's seams; see the type-only imports above. */
 type ClientContext = Context
@@ -102,7 +102,11 @@ export function apply(ctx: Context): void {
       const binding = scope.sessions.binding(sessionId as SessionId)
       const fold = binding === undefined ? null : turnFactsOf(binding.eventSource)
       return {
+        sessionId,
         turnFacts: (): ReadonlyMap<number, TurnFacts> | null => (fold === null ? null : fold()),
+        // Read fresh on each export rather than held: see `turnSourcesFor`.
+        turnSources: (): ReadonlyMap<number, TurnSource> | null =>
+          (binding === undefined ? null : turnSourcesFor(binding.eventSource)),
         sessionTotals: (): SessionTotals | null => {
           const session = binding?.session
           return session === undefined ? null : readSessionTotals(session.projections)

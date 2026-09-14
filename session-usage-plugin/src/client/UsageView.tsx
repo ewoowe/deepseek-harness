@@ -17,6 +17,10 @@
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import type { PropsLocale, PropsRuntime, Translate } from '@deepseek-ai/dsh-client-ui-slots'
 import { Coverage } from './Coverage.tsx'
+import {
+  downloadText, exportFileName, transcriptJsonl, transcriptMarkdown, usageCsv, usageJson,
+  type ExportInput, type ExportTurn,
+} from './export.ts'
 import { formatCompactDuration, formatCompactTokens, type SessionTotals } from './format.ts'
 import { NS, type MessagesKey } from './locales.ts'
 import { MessageUsageTable } from './MessageUsageTable.tsx'
@@ -29,13 +33,23 @@ import { EMPTY_STYLE, ROOT_STYLE } from './table-styles.ts'
 import {
   parseLocalInput, rangeWindow, RANGE_KEYS, toLocalInput, type RangeKey,
 } from './time-range.ts'
-import type { TurnFacts } from './turn-facts.ts'
+import type { TurnFacts, TurnSource } from './turn-facts.ts'
 import { foldUsageByModel, totalsOf } from './usage-by-model.ts'
 
 /** The face this plugin injects into its own view registration. */
 export interface UsageViewInjected {
+  /** The session this view is showing; every export names itself after it. */
+  readonly sessionId: string
   /** Every turn's facts for the viewing session, or null when no binding exists. */
   readonly turnFacts: () => ReadonlyMap<number, TurnFacts> | null
+  /**
+   * Every turn's own events, prompt and replies — what the exports read.
+   *
+   * A separate face from `turnFacts` on purpose: the table wants figures, the
+   * export wants the prose and, for its raw form, the events themselves. Holding
+   * both for every render would pay for one of them always and use it never.
+   */
+  readonly turnSources: () => ReadonlyMap<number, TurnSource> | null
   /** The session's own totals, or null while the projections are absent. */
   readonly sessionTotals: () => SessionTotals | null
   /**
@@ -80,13 +94,13 @@ export type UsageViewProps =
 const REFRESH_MS = 2_000
 
 /**
- * How many pages one range may pull in before it leaves the rest to the button.
+ * How many pages the range loader may pull before leaving the rest to the button.
  *
  * `loadOlder` brings 50 messages per call, so this is a 2000-message reach —
- * enough for the ranges on offer in any realistic session, and a hard stop so
- * that a click cannot start an unbounded run of round trips on a session whose
- * history is enormous. The coverage line keeps offering the one-shot full load
- * for exactly that case.
+ * enough to cover any of the ranges on offer in a realistic session, and a hard
+ * stop so that one click cannot start an unbounded run of round trips on a
+ * session whose history is enormous. The one-shot full load sits beside it for
+ * exactly that case.
  */
 const MAX_RANGE_PAGES = 40
 
@@ -102,7 +116,7 @@ const RANGE_LABEL: Record<RangeKey, MessagesKey> = {
 }
 
 export function UsageView({
-  turnFacts, sessionTotals, hasOlder, loadPage, loadAll, blockComposer, t,
+  sessionId, turnFacts, turnSources, sessionTotals, hasOlder, loadPage, loadAll, blockComposer, t,
 }: UsageViewProps): ReactNode {
   const [, setTick] = useState(0)
   const [loading, setLoading] = useState(false)
@@ -141,48 +155,10 @@ export function UsageView({
     blockComposer(t('composerBlocked'))
     return () => { blockComposer(null) }
   }, [blockComposer, t])
-  // Pull in whatever the chosen range needs.
-  //
-  // A range asks a question about TIME, but the window only holds the newest part
-  // of the session — so "7 days" over a session that has run for a month opens on
-  // whatever the window happens to cover. `loadOlder` pulls one page at a time,
-  // and that is the right tool here precisely because it is exact: it stops once
-  // the range is covered, instead of dragging the whole history in to answer a
-  // question about a week.
-  //
-  // Each round re-reads the window instead of trusting a captured snapshot — the
-  // previous page has just changed it — and the loop is bounded (see
-  // {@link MAX_RANGE_PAGES}); the coverage line always keeps the one-shot full
-  // load available for the sessions that need more than one click's worth.
-  useEffect(() => {
-    if (range === 'session') return
-    // Only the lower bound matters here: loading reaches BACKWARDS, and every
-    // range that has an upper bound has it in the past, which no page can add to.
-    const from = range === 'custom'
-      ? (custom?.from ?? null)
-      : rangeWindow(range, Date.now()).from
-    if (from === null) return
-    let live = true
-    void (async () => {
-      setLoading(true)
-      try {
-        for (let page = 0; page < MAX_RANGE_PAGES && live; page += 1) {
-          const facts = turnFacts()
-          const windowOldest = facts === null ? null : (facts.values().next().value?.startedAt ?? null)
-          if (!hasOlder() || (windowOldest !== null && windowOldest <= from)) return
-          await loadPage()
-          if (!live) return
-          setTick(value => value + 1)
-        }
-      } catch {
-        // A page that fails leaves the table as it was and the button available;
-        // there is nothing useful to add to whatever the host already reported.
-      } finally {
-        if (live) setLoading(false)
-      }
-    })()
-    return () => { live = false }
-  }, [range, custom, turnFacts, hasOlder, loadPage])
+  // Nothing here loads on the reader's behalf any more. A range says what the
+  // figure covers, and a gap says what it cannot cover; paging MESSAGES in is a
+  // decision with a cost the host cannot undo, so it is the reader's to make —
+  // through the button the coverage line offers (see `fillRange`).
 
   const nameOf = useModelNameLookup()
   const facts = turnFacts()
@@ -240,6 +216,86 @@ export function UsageView({
   // no turns, and a range — or a half-filled custom form — that simply holds
   // none. "This session has no turns yet" is false in the second case.
   const emptyText = from === null && to === null ? t('empty') : t('rangeEmpty')
+
+  /**
+   * Everything the exports need, assembled from what is on screen.
+   *
+   * Built at click time rather than held: the turns' own events and prose are not
+   * what a render wants, and asking for them only here means the table never pays
+   * for them. What it exports is exactly what it shows — same range, same order,
+   * same turns — because a file that disagrees with the view it came from is worse
+   * than no file.
+   */
+  const exportInput = (): ExportInput | null => {
+    const sources = turnSources()
+    if (sources === null) return null
+    const turns: ExportTurn[] = []
+    for (const facts of scoped) {
+      const source = sources.get(facts.seq)
+      if (source !== undefined) turns.push({ facts, source })
+    }
+    return { sessionId, range, from, to, turns, totals, t, now: Date.now() }
+  }
+
+  /**
+   * Write one of the four files out.
+   *
+   * The three parts of each format — text, extension, media type — are decided
+   * together, because they have to agree: a JSON body under a `.csv` name is a
+   * file that opens in the wrong program with a confusing error.
+   */
+  const onExport = (kind: 'csv' | 'json' | 'md' | 'jsonl'): void => {
+    const input = exportInput()
+    if (input === null) return
+    const [text, extension, mime] = kind === 'csv'
+      ? [usageCsv(input), 'csv', 'text/csv']
+      : kind === 'json'
+        ? [usageJson(input), 'json', 'application/json']
+        : kind === 'md'
+          ? [transcriptMarkdown(input), 'md', 'text/markdown']
+          : [transcriptJsonl(input), 'jsonl', 'application/x-ndjson']
+    downloadText(exportFileName(input, extension), text, mime)
+  }
+
+  /**
+   * Page older history in until the window covers the range's start.
+   *
+   * Runs only when the reader asks, because what a page brings is MESSAGE BODIES
+   * and the host cannot take them back: the window only ever grows, and the real
+   * cost of "show me 7 days" is the loading it triggers, not the tables it draws.
+   * One page is 50 messages — the smallest step the Session Controller offers —
+   * and this is the exact loop: it stops the moment the oldest loaded turn is
+   * older than the range, rather than overshooting to the session's beginning.
+   *
+   * Each round re-reads the window instead of trusting a captured snapshot (the
+   * previous page has just changed it), and the loop is bounded by
+   * {@link MAX_RANGE_PAGES}; the one-shot full load stays next to it for the
+   * sessions that need more than one click's worth.
+   */
+  const fillRange = (): void => {
+    // No lower bound — the whole session is already the span — so there is no gap
+    // to close. Narrowing here also lets the loop below compare against a number.
+    if (from === null) return
+    void (async () => {
+      setLoading(true)
+      try {
+        for (let page = 0; page < MAX_RANGE_PAGES; page += 1) {
+          const facts = turnFacts()
+          const windowOldest = facts === null ? null : (facts.values().next().value?.startedAt ?? null)
+          // `from` is Infinity while a custom span has no start, which makes this
+          // true and stops the loop: an unfinished form asks for nothing.
+          if (!hasOlder() || windowOldest === null || windowOldest <= from) return
+          await loadPage()
+          setTick(value => value + 1)
+        }
+      } catch {
+        // A page that fails leaves the table as it was and the button available;
+        // there is nothing useful to add to whatever the host already reported.
+      } finally {
+        setLoading(false)
+      }
+    })()
+  }
   const canLoad = hasOlder() && (from === null ? outside > 0 : olderUnloaded)
 
   return (
@@ -296,6 +352,41 @@ export function UsageView({
           />
         </div>
       )}
+      {/* Two pairs rather than four buttons in a row: the first two hand back the
+          FIGURES, the second two the CONVERSATION, and the gap between the groups
+          is the only thing that says so. Disabled on an empty range, because a file
+          with a header and nothing else is a worse answer than a button that says
+          it has nothing to write. */}
+      <div style={EXPORTS_STYLE}>
+        <div style={SEGMENTS_STYLE}>
+          <SegmentButton
+            active={false}
+            disabled={scoped.length === 0}
+            label={t('exportCsv')}
+            onSelect={() => { onExport('csv') }}
+          />
+          <SegmentButton
+            active={false}
+            disabled={scoped.length === 0}
+            label={t('exportJson')}
+            onSelect={() => { onExport('json') }}
+          />
+        </div>
+        <div style={SEGMENTS_STYLE}>
+          <SegmentButton
+            active={false}
+            disabled={scoped.length === 0}
+            label={t('exportMd')}
+            onSelect={() => { onExport('md') }}
+          />
+          <SegmentButton
+            active={false}
+            disabled={scoped.length === 0}
+            label={t('exportJsonl')}
+            onSelect={() => { onExport('jsonl') }}
+          />
+        </div>
+      </div>
       {totals !== null && (
         <div style={CHIPS_STYLE}>
           <span style={CHIP_STYLE}>{t('tokensLabel', { value: formatCompactTokens(totals.totalTokens, t) })}</span>
@@ -326,6 +417,7 @@ export function UsageView({
         outside={outside}
         withoutUsage={withoutUsage}
         olderUnloaded={olderUnloaded}
+        onLoadRange={olderUnloaded ? fillRange : undefined}
         canLoad={canLoad}
         loading={loading}
         onLoad={() => {
@@ -341,14 +433,21 @@ export function UsageView({
   )
 }
 
-/** One choice in a segmented control: a leaf, or a time range. */
-function SegmentButton({ active, label, onSelect }: {
+/** One choice in a segmented control: a leaf, a time range, or an export. */
+function SegmentButton({ active, label, onSelect, disabled = false }: {
   readonly active: boolean
   readonly label: string
   readonly onSelect: () => void
+  readonly disabled?: boolean
 }): ReactNode {
   return (
-    <button type="button" aria-pressed={active} onClick={onSelect} style={SEGMENT_STYLE(active)}>
+    <button
+      type="button"
+      aria-pressed={active}
+      disabled={disabled}
+      onClick={onSelect}
+      style={{ ...SEGMENT_STYLE(active), ...(disabled ? DISABLED_STYLE : {}) }}
+    >
       {label}
     </button>
   )
@@ -380,6 +479,20 @@ const INPUT_STYLE: CSSProperties = {
   color: 'var(--dsw-alias-label-primary)',
   font: 'inherit',
   fontSize: 12,
+}
+
+/** The two export groups: a wider gap than inside a group, so they read as pairs. */
+const EXPORTS_STYLE: CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  flexWrap: 'wrap',
+  gap: 12,
+}
+
+/** A segment with nothing to do: dimmed, and the pointer says so too. */
+const DISABLED_STYLE: CSSProperties = {
+  opacity: 0.45,
+  cursor: 'default',
 }
 
 const CHIPS_STYLE: CSSProperties = { display: 'flex', flexWrap: 'wrap', gap: 6 }

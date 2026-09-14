@@ -123,21 +123,60 @@ shares**: averaging per turn would weigh a 3-token turn the same as a 300k one.
 window, and a client plugin cannot reach the rest — the host-side session query has no remote
 endpoint — so "Today" means *how much of this conversation was spent today*.
 
-**Picking a range pulls in the history that range needs.** The window only holds the newest
-part of a session, so "7 days" over a session that has run for a month opens with whatever the
-window happens to cover. The view then pages backwards (50 messages at a time, through the
-Session Controller's own pager) and **stops as soon as the oldest loaded turn is older than
-the range** — enough to answer the question, rather than dragging the whole history in to
-answer one about a week. The loop is capped at 40 pages (2000 messages); past that, the
-coverage line's one-shot full load finishes the job.
+**Picking a range loads nothing by itself.** The window only holds the newest part of a
+session, so "7 days" over a session that has run for a month opens with whatever the window
+happens to cover. The coverage line states the gap outright — `· older turns are not loaded
+yet` — because "Folded N of N turns" cannot show that anything is missing when N is the
+window itself.
 
-What arrives stays: **the load does not shrink back**, so history pulled in for one range
-remains loaded. Under a range the coverage line states the gap outright — `· older turns are
-not loaded yet` — because "Folded N of N turns" cannot show that anything is missing when N is
-the window itself.
+**Closing the gap is a button** ("Load the older turns in this range"). It is the exact
+loader: it pages backwards (50 messages at a time, through the Session Controller's own pager)
+and **stops as soon as the oldest loaded turn is older than the range** rather than
+overshooting to the session's beginning. It is capped at 40 pages (2000 messages), with the
+one-shot full load beside it for the sessions that need more.
+
+**Why it is not automatic:** a page brings MESSAGE BODIES, and the host cannot unload them —
+the window only ever grows. The real cost of "show me 7 days" is the loading it triggers, not
+the tables it draws, so whoever chooses it pays it.
 
 The range is remembered too (below), and it is the one preference whose meaning moves:
 "Today" always answers for today when the view is opened, not for the day it was picked.
+
+## Export
+
+Four buttons sit under the range row, in two pairs: the first two hand back the **figures**, the
+second two the **conversation**.
+
+| Button | What you get |
+|---|---|
+| Stats CSV | the table's own columns; **compact** figures (`8.2K`, `1m12s`), one summary row at the end |
+| Stats JSON | **raw numbers** — `seq`, the whole usage bucket, the route source — for a program |
+| Chat MD | every turn's **full** prompt and replies, as Markdown |
+| Chat JSONL | every turn's **raw events**, one JSON per line, the shape the host writes |
+
+Three deliberate trade-offs:
+
+- **CSV carries compact figures, JSON carries raw ones.** The first is read by a person in a
+  spreadsheet (`8.2K` scans better than `8214`); the second by a program, which cannot undo
+  formatting. The cache column drops its `%` in CSV — a figure that still needs its suffix
+  stripped before it can be summed is not a figure, it is a label.
+- **The CSV summary row does not pretend to split the buckets.** The range's split between
+  billed input and output is not something this view computes anywhere, and inventing it would
+  put a number in the export that no surface in the app agrees with. It states the four things
+  that do agree: turns, tokens, wall time, cache share.
+- **Markdown uses the full text.** The table shows a truncated preview, and truncation is a
+  view concern — a reader who asks for the conversation wants the conversation, not what fitted
+  in a cell.
+
+**What you export is what is on screen**: same range, same order, same turns — and the same
+honesty about the gap, so turns older than the loaded window are absent from the file exactly
+as they are absent from the table. On an empty range all four buttons are **disabled**: a file
+with a header and nothing else is not a better answer than "nothing to write".
+
+CSV fields are quoted the way RFC 4180 says (quoted when they carry a comma, a quote or a
+newline; inner quotes doubled). Prompts contain all three as a matter of course, and an
+unquoted one does not merely look wrong — it **shifts every later column of that row**, and the
+spreadsheet quietly reads a different set of figures than the table did.
 
 ## Remembering where you were
 

@@ -34,6 +34,16 @@ export interface CoverageProps {
    * reading this line exists to prevent.
    */
   readonly olderUnloaded: boolean
+  /**
+   * Page history in until the range is covered, or undefined when there is
+   * nothing to page for.
+   *
+   * A separate action from {@link CoverageProps.canLoad}'s one-shot full load:
+   * this one is exact — it stops the moment the window reaches the range's
+   * start — and it is what the reader asks for after being told the gap exists,
+   * rather than something this view does on their behalf.
+   */
+  readonly onLoadRange?: () => void
   /** Whether "load the full history" can make a difference right now. */
   readonly canLoad: boolean
   readonly loading: boolean
@@ -42,7 +52,7 @@ export interface CoverageProps {
 }
 
 export function Coverage({
-  covered, total, outside, withoutUsage, olderUnloaded, canLoad, loading, onLoad, t,
+  covered, total, outside, withoutUsage, olderUnloaded, onLoadRange, canLoad, loading, onLoad, t,
 }: CoverageProps): ReactNode {
   if (total <= covered && !olderUnloaded) return null
   return (
@@ -51,6 +61,19 @@ export function Coverage({
       {outside > 0 && <span>{t('outsideWindow', { count: String(outside) })}</span>}
       {withoutUsage > 0 && <span>{t('noUsage', { count: String(withoutUsage) })}</span>}
       {olderUnloaded && <span>{t('rangeGap')}</span>}
+      {/* The range's own loader comes FIRST: it is the exact one, and the full
+          load next to it would overshoot the range by everything older. */}
+      {onLoadRange !== undefined && (
+        <button
+          type="button"
+          disabled={loading}
+          title={t('loadRangeHint')}
+          onClick={onLoadRange}
+          style={BUTTON_STYLE}
+        >
+          {t('loadRange')}
+        </button>
+      )}
       {canLoad && (
         <>
           <button
