@@ -308,19 +308,58 @@ export function UsageView({
     // frame's DOM: the shell renders the whole mode off this one attribute, and
     // it goes away by itself when this view does.
     <div ref={root} style={ROOT_STYLE} data-conversation-composer-overlay="">
-      {/* The range comes first and the pills below it report that range — the
-          other order reads as if the session's own figures were being filtered
-          after the fact, which is the one thing they must not look like: under a
-          range they are a different computation, not the same one narrowed. */}
-      <div style={SEGMENTS_STYLE}>
-        {RANGE_KEYS.map(key => (
-          <SegmentButton
-            key={key}
-            active={range === key}
-            label={t(RANGE_LABEL[key])}
-            onSelect={() => { selectRange(key) }}
-          />
-        ))}
+      {/* One row across the top: what slice to look at on the left, what to take
+          away on the right. The range leads because the pills below it report that
+          range — the other order reads as if the session's own figures were being
+          filtered after the fact, which is the one thing they must not look like:
+          under a range they are a different computation, not the same one
+          narrowed. */}
+      <div style={TOPBAR_STYLE}>
+        <div style={SEGMENTS_STYLE}>
+          {RANGE_KEYS.map(key => (
+            <SegmentButton
+              key={key}
+              active={range === key}
+              label={t(RANGE_LABEL[key])}
+              onSelect={() => { selectRange(key) }}
+            />
+          ))}
+        </div>
+        {/* Two pairs rather than four buttons in a row: the first two hand back the
+            FIGURES, the second two the CONVERSATION, and the gap between the groups
+            is the only thing that says so. Disabled on an empty range, because a
+            file with a header and nothing else is a worse answer than a button that
+            says it has nothing to write. */}
+        <div style={EXPORTS_STYLE}>
+          <div style={SEGMENTS_STYLE}>
+            <SegmentButton
+              active={false}
+              disabled={scoped.length === 0}
+              label={t('exportCsv')}
+              onSelect={() => { onExport('csv') }}
+            />
+            <SegmentButton
+              active={false}
+              disabled={scoped.length === 0}
+              label={t('exportJson')}
+              onSelect={() => { onExport('json') }}
+            />
+          </div>
+          <div style={SEGMENTS_STYLE}>
+            <SegmentButton
+              active={false}
+              disabled={scoped.length === 0}
+              label={t('exportMd')}
+              onSelect={() => { onExport('md') }}
+            />
+            <SegmentButton
+              active={false}
+              disabled={scoped.length === 0}
+              label={t('exportJsonl')}
+              onSelect={() => { onExport('jsonl') }}
+            />
+          </div>
+        </div>
       </div>
       {/* Two `datetime-local` fields, so every instant is read and written in the
           reader's own zone — the same zone every fixed bound in the time-range
@@ -352,41 +391,6 @@ export function UsageView({
           />
         </div>
       )}
-      {/* Two pairs rather than four buttons in a row: the first two hand back the
-          FIGURES, the second two the CONVERSATION, and the gap between the groups
-          is the only thing that says so. Disabled on an empty range, because a file
-          with a header and nothing else is a worse answer than a button that says
-          it has nothing to write. */}
-      <div style={EXPORTS_STYLE}>
-        <div style={SEGMENTS_STYLE}>
-          <SegmentButton
-            active={false}
-            disabled={scoped.length === 0}
-            label={t('exportCsv')}
-            onSelect={() => { onExport('csv') }}
-          />
-          <SegmentButton
-            active={false}
-            disabled={scoped.length === 0}
-            label={t('exportJson')}
-            onSelect={() => { onExport('json') }}
-          />
-        </div>
-        <div style={SEGMENTS_STYLE}>
-          <SegmentButton
-            active={false}
-            disabled={scoped.length === 0}
-            label={t('exportMd')}
-            onSelect={() => { onExport('md') }}
-          />
-          <SegmentButton
-            active={false}
-            disabled={scoped.length === 0}
-            label={t('exportJsonl')}
-            onSelect={() => { onExport('jsonl') }}
-          />
-        </div>
-      </div>
       {totals !== null && (
         <div style={CHIPS_STYLE}>
           <span style={CHIP_STYLE}>{t('tokensLabel', { value: formatCompactTokens(totals.totalTokens, t) })}</span>
@@ -481,12 +485,30 @@ const INPUT_STYLE: CSSProperties = {
   fontSize: 12,
 }
 
+/**
+ * The view's top row: the range on the left, the exports on the right.
+ *
+ * The right alignment is `margin-left: auto` on the exports rather than
+ * `justify-content` on the row. On a narrow column the groups wrap, and
+ * space-between would then leave the second line flush LEFT — which is the one
+ * place a reader does not look for "take this away". An auto margin keeps them
+ * right whatever the column does.
+ */
+const TOPBAR_STYLE: CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'space-between',
+  flexWrap: 'wrap',
+  gap: 8,
+}
+
 /** The two export groups: a wider gap than inside a group, so they read as pairs. */
 const EXPORTS_STYLE: CSSProperties = {
   display: 'flex',
   alignItems: 'center',
   flexWrap: 'wrap',
   gap: 12,
+  marginLeft: 'auto',
 }
 
 /** A segment with nothing to do: dimmed, and the pointer says so too. */
