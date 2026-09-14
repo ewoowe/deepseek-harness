@@ -42,6 +42,21 @@ export type MessagesKey =
   | 'colMessage'
   | 'noPrompt'
   | 'composerBlocked'
+  // Time ranges. The labels name the window the reader is choosing, so they are
+  // copy rather than numbers: "24 hours" and "3 days" are how each language
+  // spells a span, not a value to interpolate into one pattern.
+  | 'rangeSession'
+  | 'rangeToday'
+  | 'rangeDay'
+  | 'rangeYesterday'
+  | 'rangeDays3'
+  | 'rangeDays7'
+  | 'rangeGap'
+  | 'rangeCustom'
+  | 'rangeFrom'
+  | 'rangeTo'
+  | 'rangeUntil'
+  | 'rangeEmpty'
   // Compact number and duration units. Not copy of their own: they are how this
   // plugin's figures are spelled, and every language spells them its own way.
   | 'numberThousand'
@@ -80,6 +95,18 @@ export const zh: Record<MessagesKey, string> = {
   colMessage: '消息',
   noPrompt: '（无可读提示词）',
   composerBlocked: '用量视图不接收输入，切回「对话」即可继续',
+  rangeSession: '本会话',
+  rangeToday: '今天',
+  rangeDay: '24 小时',
+  rangeYesterday: '昨天',
+  rangeDays3: '3 天',
+  rangeDays7: '7 天',
+  rangeGap: '· 更早的轮次还没载入',
+  rangeCustom: '自定义',
+  rangeFrom: '起始时间',
+  rangeTo: '至',
+  rangeUntil: '结束时间',
+  rangeEmpty: '没有落在所选时间段内的轮次',
   numberThousand: '{value}K',
   numberMillion: '{value}M',
   durationSeconds: '{seconds}秒',
@@ -117,6 +144,18 @@ export const en: Record<MessagesKey, string> = {
   colMessage: 'Message',
   noPrompt: '(no readable prompt)',
   composerBlocked: 'The usage view takes no input — switch back to Conversation to type',
+  rangeSession: 'Session',
+  rangeToday: 'Today',
+  rangeDay: '24 hours',
+  rangeYesterday: 'Yesterday',
+  rangeDays3: '3 days',
+  rangeDays7: '7 days',
+  rangeGap: '· older turns are not loaded yet',
+  rangeCustom: 'Custom',
+  rangeFrom: 'From',
+  rangeTo: 'to',
+  rangeUntil: 'Until',
+  rangeEmpty: 'No turns fall inside the chosen span',
   numberThousand: '{value}K',
   numberMillion: '{value}M',
   durationSeconds: '{seconds}s',

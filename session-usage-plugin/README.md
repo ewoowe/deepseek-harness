@@ -81,15 +81,75 @@ four times this plugin's own paging, so the whole session arrives in a quarter o
 trips. The cost is stated in the button's hint: **the load does not shrink back** — it holds
 until the page is reloaded, and it cannot be cancelled.
 
+## Time ranges
+
+A row of range buttons sits above the tables, **defaulting to "Session"** — the behaviour
+described above, unchanged:
+
+| Range | Span |
+|---|---|
+| Session | no bounds: the whole session, read from the projection |
+| Today | **local midnight** → now |
+| 24 hours | a **rolling 24 hours**: this moment minus a day |
+| Yesterday | **local midnight yesterday → local midnight today** (half-open) |
+| 3 days | **local midnight** three calendar days back → now |
+| 7 days | **local midnight** seven calendar days back → now |
+| Custom | **the two ends you pick** (your own zone; an empty end means "until now") |
+
+The shapes are deliberately different, and each is the reader's own words: "today" names a
+calendar day, while "the last day" is spelled out as *from this time yesterday* — **not**
+yesterday's midnight, which would under-count a morning reading by most of a day.
+
+**Yesterday is the only fixed range with both ends set.** Every other fixed range runs to the
+present ("the last three days" includes today), while yesterday is a **closed calendar day** —
+with a lower bound alone it would quietly swallow today as well. The upper bound is
+**exclusive**, so a turn starting exactly at midnight belongs to today: the two ranges meet
+without either claiming that instant twice.
+
+**Custom is yours to set**, through two native date-time fields that read and write in your own
+zone (UTC would show a time hours away from the one you picked). An empty end means "until
+now". With **no start chosen the table is empty**, not everything — showing the whole session
+halfway through filling the form would read as the custom range being ignored. It is also the
+one range that remembers *instants*: every other range is computed relative to now, while this
+one stores two fixed moments.
+
+Once a range is chosen the pills above the tables are **no longer the projection**. No
+projection carries a time dimension, so they are summed from the turns inside the range
+instead, and the cache share is the share of those SUMS (cache reads and billed input summed
+first, then run through the host's own formatter). **The share of a sum is not the average of
+shares**: averaging per turn would weigh a 3-token turn the same as a 300k one.
+
+**Ranges are within the session.** This plugin reads one session's projections and one event
+window, and a client plugin cannot reach the rest — the host-side session query has no remote
+endpoint — so "Today" means *how much of this conversation was spent today*.
+
+**Picking a range pulls in the history that range needs.** The window only holds the newest
+part of a session, so "7 days" over a session that has run for a month opens with whatever the
+window happens to cover. The view then pages backwards (50 messages at a time, through the
+Session Controller's own pager) and **stops as soon as the oldest loaded turn is older than
+the range** — enough to answer the question, rather than dragging the whole history in to
+answer one about a week. The loop is capped at 40 pages (2000 messages); past that, the
+coverage line's one-shot full load finishes the job.
+
+What arrives stays: **the load does not shrink back**, so history pulled in for one range
+remains loaded. Under a range the coverage line states the gap outright — `· older turns are
+not loaded yet` — because "Folded N of N turns" cannot show that anything is missing when N is
+the window itself.
+
+The range is remembered too (below), and it is the one preference whose meaning moves:
+"Today" always answers for today when the view is opened, not for the day it was picked.
+
 ## Remembering where you were
 
-Three reader preferences, all in `localStorage` under a `dsh-session-usage.` prefix:
+Five reader preferences, all in `localStorage` under a `dsh-session-usage.` prefix:
 
 | Key | What it remembers |
 |---|---|
 | `…message-sort` | the message table's sort column and direction |
 | `…leaf` | which leaf you were on |
 | `…scroll` | how far down the page you had read |
+| `…range` | which time range you were on |
+| `…custom-range` | the two ends of the custom span |
 
 Two layers, and both are load-bearing: a **module-level value** covers the unmount (the leaves
 are conditionally rendered, so switching leaves unmounts the table and a `useState` would
@@ -152,10 +212,11 @@ session-usage-plugin/
       turn-facts.ts          event window → per-turn facts (model, usage, cache, wall time, prompt)
       usage-by-model.ts      per-turn facts → one row per model
       format.ts              compact numbers/durations + the ported cache-hit format
-      preferences.ts         the three reader preferences (sort / leaf / scroll)
+      preferences.ts         the five reader preferences (sort / leaf / scroll / range / custom span)
       model-names.ts         display names: host catalog → id lookup
       Coverage.tsx           the coverage line and "Load the full history"
       table-styles.ts        table chrome shared by both tables, and the page root style
+      time-range.ts          fixed ranges, their local calendar bounds, and the custom span's local time
       locales.ts             the zh / en dictionaries
   lib/                build output (index.js / client.js)
 ```

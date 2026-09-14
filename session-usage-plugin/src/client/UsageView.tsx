@@ -22,10 +22,15 @@ import { NS, type MessagesKey } from './locales.ts'
 import { MessageUsageTable } from './MessageUsageTable.tsx'
 import { ModelUsageTable } from './ModelUsageTable.tsx'
 import { useModelNameLookup } from './model-names.ts'
-import { useLeaf, useScrollMemory, writeLeaf } from './preferences.ts'
+import {
+  getCustomRange, useCustomRange, useLeaf, useRange, useScrollMemory, writeCustomRange, writeLeaf, writeRange,
+} from './preferences.ts'
 import { EMPTY_STYLE, ROOT_STYLE } from './table-styles.ts'
+import {
+  parseLocalInput, rangeWindow, RANGE_KEYS, toLocalInput, type RangeKey,
+} from './time-range.ts'
 import type { TurnFacts } from './turn-facts.ts'
-import { foldUsageByModel } from './usage-by-model.ts'
+import { foldUsageByModel, totalsOf } from './usage-by-model.ts'
 
 /** The face this plugin injects into its own view registration. */
 export interface UsageViewInjected {
@@ -40,8 +45,15 @@ export interface UsageViewInjected {
    * separates "this session used one model" from "one page of it did".
    */
   readonly hasOlder: () => boolean
-  /** Page the rest of the session in, so the tables can cover all of it. */
-  readonly loadOlder: () => Promise<void>
+  /**
+   * Pull ONE page of older history in — the Session Controller's own pager.
+   *
+   * Used by the auto-load behind a time range, which can stop as soon as the
+   * range is covered instead of loading history the range will then filter out.
+   */
+  readonly loadPage: () => Promise<void>
+  /** Pull the REST of the session in, in one call: the coverage line's button. */
+  readonly loadAll: () => Promise<void>
   /**
    * Make the composer inert with a reason, or clear it.
    *
@@ -67,8 +79,30 @@ export type UsageViewProps =
  */
 const REFRESH_MS = 2_000
 
+/**
+ * How many pages one range may pull in before it leaves the rest to the button.
+ *
+ * `loadOlder` brings 50 messages per call, so this is a 2000-message reach —
+ * enough for the ranges on offer in any realistic session, and a hard stop so
+ * that a click cannot start an unbounded run of round trips on a session whose
+ * history is enormous. The coverage line keeps offering the one-shot full load
+ * for exactly that case.
+ */
+const MAX_RANGE_PAGES = 40
+
+/** The copy key for each range, so the buttons can be built from `RANGE_KEYS`. */
+const RANGE_LABEL: Record<RangeKey, MessagesKey> = {
+  session: 'rangeSession',
+  today: 'rangeToday',
+  day: 'rangeDay',
+  yesterday: 'rangeYesterday',
+  days3: 'rangeDays3',
+  days7: 'rangeDays7',
+  custom: 'rangeCustom',
+}
+
 export function UsageView({
-  turnFacts, sessionTotals, hasOlder, loadOlder, blockComposer, t,
+  turnFacts, sessionTotals, hasOlder, loadPage, loadAll, blockComposer, t,
 }: UsageViewProps): ReactNode {
   const [, setTick] = useState(0)
   const [loading, setLoading] = useState(false)
@@ -76,6 +110,20 @@ export function UsageView({
   // reader coming back to the per-message table would otherwise have to find the
   // leaf again on every visit.
   const leaf = useLeaf()
+  // Remembered for the same reason, and it is the one preference whose meaning
+  // moves: it is relative to NOW, so "today" answers for today whenever the view
+  // is opened rather than for the day it was picked.
+  const range = useRange()
+  const custom = useCustomRange()
+  // Opening "custom" with an empty form would show an empty table until both
+  // fields are filled, so it starts on today and the reader moves whichever end
+  // they came to change.
+  const selectRange = (key: RangeKey): void => {
+    writeRange(key)
+    if (key === 'custom' && getCustomRange() === null) {
+      writeCustomRange({ from: rangeWindow('today', Date.now()).from ?? Date.now(), to: null })
+    }
+  }
   // Same reason as the leaf above, one dimension further: the shell parks a
   // conversation area at the bottom, so a reader returning to a long table was
   // shown a different part of it every time.
@@ -93,19 +141,106 @@ export function UsageView({
     blockComposer(t('composerBlocked'))
     return () => { blockComposer(null) }
   }, [blockComposer, t])
+  // Pull in whatever the chosen range needs.
+  //
+  // A range asks a question about TIME, but the window only holds the newest part
+  // of the session — so "7 days" over a session that has run for a month opens on
+  // whatever the window happens to cover. `loadOlder` pulls one page at a time,
+  // and that is the right tool here precisely because it is exact: it stops once
+  // the range is covered, instead of dragging the whole history in to answer a
+  // question about a week.
+  //
+  // Each round re-reads the window instead of trusting a captured snapshot — the
+  // previous page has just changed it — and the loop is bounded (see
+  // {@link MAX_RANGE_PAGES}); the coverage line always keeps the one-shot full
+  // load available for the sessions that need more than one click's worth.
+  useEffect(() => {
+    if (range === 'session') return
+    // Only the lower bound matters here: loading reaches BACKWARDS, and every
+    // range that has an upper bound has it in the past, which no page can add to.
+    const from = range === 'custom'
+      ? (custom?.from ?? null)
+      : rangeWindow(range, Date.now()).from
+    if (from === null) return
+    let live = true
+    void (async () => {
+      setLoading(true)
+      try {
+        for (let page = 0; page < MAX_RANGE_PAGES && live; page += 1) {
+          const facts = turnFacts()
+          const windowOldest = facts === null ? null : (facts.values().next().value?.startedAt ?? null)
+          if (!hasOlder() || (windowOldest !== null && windowOldest <= from)) return
+          await loadPage()
+          if (!live) return
+          setTick(value => value + 1)
+        }
+      } catch {
+        // A page that fails leaves the table as it was and the button available;
+        // there is nothing useful to add to whatever the host already reported.
+      } finally {
+        if (live) setLoading(false)
+      }
+    })()
+    return () => { live = false }
+  }, [range, custom, turnFacts, hasOlder, loadPage])
 
   const nameOf = useModelNameLookup()
-  const totals = sessionTotals()
   const facts = turnFacts()
-  const turns = facts === null ? [] : [...facts.values()]
-  const models = facts === null || leaf !== 'models' ? [] : foldUsageByModel(facts)
+  // Resolved per render, and this view re-renders on its own poll — so a range
+  // moves without any subscription to the clock: "today" rolls over at local
+  // midnight, and "24 hours" slides forward, both within one tick of happening.
+  // A custom span comes from the reader, so no function of `now` yields it; the
+  // fixed ranges resolve as before. While NO start is chosen the span is EMPTY
+  // rather than open: showing the whole session halfway through filling the form
+  // would read as the custom range being ignored.
+  const { from, to } = range === 'custom'
+    ? { from: custom?.from ?? Number.POSITIVE_INFINITY, to: custom?.to ?? null }
+    : rangeWindow(range, Date.now())
+  // The WINDOW's turns, unfiltered, in the fold's own order (oldest first).
+  // Nothing renders this list: it is what a range narrows (`scoped` below), and
+  // what the auto-load measures the window's oldest turn from. The name is load
+  // bearing — handing this to a table instead of `scoped` has the same type and
+  // reads as the range applying to everything except the rows.
+  const windowTurns = facts === null ? [] : [...facts.values()]
+  // The range narrows the TURNS, and everything downstream — both leaves, the
+  // totals and the coverage — is computed from what is left, so no two surfaces
+  // can end up describing different slices. A turn whose start is unknown is
+  // outside every bounded range: it cannot be shown to be inside one.
+  //
+  // `to` is exclusive and open for every range but one: "yesterday" ends at the
+  // midnight that begins today, so a turn starting exactly then is today's — the
+  // two ranges meet without either claiming that instant twice.
+  const scoped = from === null ? windowTurns : windowTurns.filter(turn => turn.startedAt !== null
+    && turn.startedAt >= from && (to === null || turn.startedAt < to))
+  const scopedFacts = from === null ? facts : new Map(scoped.map(turn => [turn.seq, turn]))
+  // The whole session reads the projection, which the Host computes over the
+  // WHOLE log — paging the window cannot move it. A range cannot use that: no
+  // projection carries a time dimension, so it sums the same three figures from
+  // its own turns instead, and is exact about the slice it describes rather
+  // than right about a session it is not showing.
+  const totals = from === null ? sessionTotals() : totalsOf(scoped)
+  const models = scopedFacts === null || leaf !== 'models' ? [] : foldUsageByModel(scopedFacts)
   // Coverage is the same question for both leaves — one window, one answer — so it
-  // is computed once here rather than inside each table.
-  const covered = turns.filter(turn => turn.usage !== null).length
-  const total = totals?.turns ?? 0
-  const outside = Math.max(0, total - turns.length)
-  const withoutUsage = Math.max(0, turns.length - covered)
-  const canLoad = outside > 0 && hasOlder()
+  // is computed once here rather than inside each table. Under a range everything
+  // counted is loaded by definition, so the "outside the window" part of the gap
+  // falls to zero and that clause simply stops appearing.
+  const covered = scoped.filter(turn => turn.usage !== null).length
+  const total = from === null ? (totals?.turns ?? 0) : scoped.length
+  const outside = Math.max(0, total - scoped.length)
+  const withoutUsage = Math.max(0, scoped.length - covered)
+  // The oldest turn in the window is the first one the fold produced: the map is
+  // keyed by seq and filled in event order, so its first entry is the earliest.
+  const oldest = windowTurns[0]?.startedAt ?? null
+  // Under a range the counts above cannot see past the window — `total` IS the
+  // window — so a range reaching back further than the loaded history has to
+  // report that itself, or a reader narrowing to "7 days" would see a short table
+  // and no sign that it is short. This is also the signal the auto-load reads.
+  const olderUnloaded = from !== null && hasOlder() && (oldest === null || oldest > from)
+  // An empty table has two causes and they need different words: a session with
+  // no turns, and a range — or a half-filled custom form — that simply holds
+  // none. "This session has no turns yet" is false in the second case.
+  const emptyText = from === null && to === null ? t('empty') : t('rangeEmpty')
+  const canLoad = hasOlder() && (from === null ? outside > 0 : olderUnloaded)
 
   return (
     // `data-conversation-composer-overlay` is the shell's own switch for "this
@@ -117,6 +252,50 @@ export function UsageView({
     // frame's DOM: the shell renders the whole mode off this one attribute, and
     // it goes away by itself when this view does.
     <div ref={root} style={ROOT_STYLE} data-conversation-composer-overlay="">
+      {/* The range comes first and the pills below it report that range — the
+          other order reads as if the session's own figures were being filtered
+          after the fact, which is the one thing they must not look like: under a
+          range they are a different computation, not the same one narrowed. */}
+      <div style={SEGMENTS_STYLE}>
+        {RANGE_KEYS.map(key => (
+          <SegmentButton
+            key={key}
+            active={range === key}
+            label={t(RANGE_LABEL[key])}
+            onSelect={() => { selectRange(key) }}
+          />
+        ))}
+      </div>
+      {/* Two `datetime-local` fields, so every instant is read and written in the
+          reader's own zone — the same zone every fixed bound in the time-range
+          module is built in. The end may be left empty, which means "until now",
+          the open end the other ranges use. No clamping between them: a start
+          after the end is an empty span, and the empty state says so. */}
+      {range === 'custom' && (
+        <div style={CUSTOM_STYLE}>
+          <input
+            type="datetime-local"
+            aria-label={t('rangeFrom')}
+            style={INPUT_STYLE}
+            value={custom === null ? '' : toLocalInput(custom.from)}
+            onChange={(event) => {
+              const at = parseLocalInput(event.target.value)
+              writeCustomRange(at === null ? null : { from: at, to: custom?.to ?? null })
+            }}
+          />
+          <span>{t('rangeTo')}</span>
+          <input
+            type="datetime-local"
+            aria-label={t('rangeUntil')}
+            style={INPUT_STYLE}
+            value={custom === null || custom.to === null ? '' : toLocalInput(custom.to)}
+            onChange={(event) => {
+              if (custom === null) return
+              writeCustomRange({ from: custom.from, to: parseLocalInput(event.target.value) })
+            }}
+          />
+        </div>
+      )}
       {totals !== null && (
         <div style={CHIPS_STYLE}>
           <span style={CHIP_STYLE}>{t('tokensLabel', { value: formatCompactTokens(totals.totalTokens, t) })}</span>
@@ -126,27 +305,32 @@ export function UsageView({
           )}
         </div>
       )}
-      <div style={LEAVES_STYLE}>
-        <LeafButton active={leaf === 'models'} label={t('modelTitle')} onSelect={() => { writeLeaf('models') }} />
-        <LeafButton active={leaf === 'messages'} label={t('messageTitle')} onSelect={() => { writeLeaf('messages') }} />
+      <div style={SEGMENTS_STYLE}>
+        <SegmentButton active={leaf === 'models'} label={t('modelTitle')} onSelect={() => { writeLeaf('models') }} />
+        <SegmentButton active={leaf === 'messages'} label={t('messageTitle')} onSelect={() => { writeLeaf('messages') }} />
       </div>
+      {/* `scoped`, never `turns`: a range narrows the table as well as the figures
+          above it. Passing the window's own list here is a mistake that cannot be
+          caught by types — both are the same shape — and it reads as the range
+          applying to everything except the rows. */}
       {leaf === 'models'
         ? (models.length === 0
-            ? <div style={EMPTY_STYLE}>{t('empty')}</div>
+            ? <div style={EMPTY_STYLE}>{emptyText}</div>
             : <ModelUsageTable models={models} nameOf={nameOf} t={t} />)
-        : (turns.length === 0
-            ? <div style={EMPTY_STYLE}>{t('empty')}</div>
-            : <MessageUsageTable turns={turns} nameOf={nameOf} t={t} />)}
+        : (scoped.length === 0
+            ? <div style={EMPTY_STYLE}>{emptyText}</div>
+            : <MessageUsageTable turns={scoped} nameOf={nameOf} t={t} />)}
       <Coverage
         covered={covered}
         total={total}
         outside={outside}
         withoutUsage={withoutUsage}
+        olderUnloaded={olderUnloaded}
         canLoad={canLoad}
         loading={loading}
         onLoad={() => {
           setLoading(true)
-          void loadOlder()
+          void loadAll()
             .then(() => { setTick(value => value + 1) })
             .catch(() => undefined)
             .finally(() => { setLoading(false) })
@@ -157,17 +341,45 @@ export function UsageView({
   )
 }
 
-/** One of the two leaves. */
-function LeafButton({ active, label, onSelect }: {
+/** One choice in a segmented control: a leaf, or a time range. */
+function SegmentButton({ active, label, onSelect }: {
   readonly active: boolean
   readonly label: string
   readonly onSelect: () => void
 }): ReactNode {
   return (
-    <button type="button" aria-pressed={active} onClick={onSelect} style={LEAF_STYLE(active)}>
+    <button type="button" aria-pressed={active} onClick={onSelect} style={SEGMENT_STYLE(active)}>
       {label}
     </button>
   )
+}
+
+/** The custom range's two fields, on a line of their own under the buttons. */
+const CUSTOM_STYLE: CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  flexWrap: 'wrap',
+  gap: 6,
+  fontSize: 12,
+  color: 'var(--dsw-alias-label-tertiary)',
+}
+
+/**
+ * A native date-time field, coloured from the shell's own tokens.
+ *
+ * Deliberately no `color-scheme` override: the browser draws the picker and its
+ * icon, and forcing a scheme would fight a reader who runs the other one. The
+ * tokens above are what every other surface here uses, so the field matches the
+ * page in either.
+ */
+const INPUT_STYLE: CSSProperties = {
+  padding: '3px 6px',
+  border: '0.5px solid var(--dsw-alias-border-l4)',
+  borderRadius: 6,
+  background: 'var(--dsw-alias-bg-layer-2)',
+  color: 'var(--dsw-alias-label-primary)',
+  font: 'inherit',
+  fontSize: 12,
 }
 
 const CHIPS_STYLE: CSSProperties = { display: 'flex', flexWrap: 'wrap', gap: 6 }
@@ -180,9 +392,15 @@ const CHIP_STYLE: CSSProperties = {
   color: 'var(--dsw-alias-label-secondary)',
 }
 
-const LEAVES_STYLE: CSSProperties = {
+/**
+ * One segmented control. `flexWrap` is here for the range row: five labels, two
+ * of them spelled out ("24 hours"), do not fit a narrow column on one line, and
+ * a wrapped row is legible where a clipped one is not.
+ */
+const SEGMENTS_STYLE: CSSProperties = {
   display: 'flex',
   alignItems: 'center',
+  flexWrap: 'wrap',
   gap: 2,
   padding: 2,
   borderRadius: 8,
@@ -195,7 +413,7 @@ const LEAVES_STYLE: CSSProperties = {
  * else; the inactive one keeps the strip's own background so the pair reads as one
  * control rather than as two buttons.
  */
-function LEAF_STYLE(active: boolean): CSSProperties {
+function SEGMENT_STYLE(active: boolean): CSSProperties {
   return {
     padding: '3px 10px',
     border: 'none',

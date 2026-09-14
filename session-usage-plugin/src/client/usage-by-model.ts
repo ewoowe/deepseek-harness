@@ -15,7 +15,7 @@
  * not expose — and inventing a second set of counting rules is how two surfaces end
  * up disagreeing.
  */
-import { turnCacheHitOf } from './format.ts'
+import { turnCacheHitOf, type SessionTotals } from './format.ts'
 import type { ModelRoute, TurnFacts } from './turn-facts.ts'
 
 /** One model's share of a session's usage. */
@@ -117,4 +117,50 @@ export function foldUsageByModel(byTurn: ReadonlyMap<number, TurnFacts>): readon
       }),
     }))
     .sort((left, right) => right.totalTokens - left.totalTokens)
+}
+
+/**
+ * The session totals, folded from a set of turns rather than read from the
+ * projection.
+ *
+ * A time range needs this. The projection answers "what has this session spent"
+ * over the WHOLE log, and no projection carries a time dimension, so "this
+ * session, today" has no source but the turns themselves. The three figures are
+ * the same three the projection sums — billed input, output, wall time — and the
+ * cache share is derived from the SUMS through the same expression the per-model
+ * rows and the host's own turn dialog use.
+ *
+ * **The share of a sum is not the average of shares.** Averaging per-turn
+ * percentages would let a turn with 3 tokens weigh as much as one with 300k, and
+ * the figure would disagree with the host's own arithmetic on the same data.
+ *
+ * `turns` counts the turns that actually carry usage, matching what the
+ * projection means by its own `turns` field: a turn the host's fold refuses to
+ * compute is not one of them, which is also what makes the coverage line's
+ * arithmetic work out.
+ * @param turns - the turns inside the range, as the view's fold produced them.
+ * @returns the same shape the view renders for the whole session.
+ */
+export function totalsOf(turns: readonly TurnFacts[]): SessionTotals {
+  let cacheRead = 0
+  let output = 0
+  let total = 0
+  let busyMs = 0
+  let counted = 0
+  for (const turn of turns) {
+    const usage = turn.usage
+    if (usage !== null) {
+      cacheRead += usage.cacheReadTokens ?? 0
+      output += usage.outputTokens ?? 0
+      total += usage.totalTokens ?? 0
+      counted += 1
+    }
+    if (turn.busyMs !== null) busyMs += turn.busyMs
+  }
+  return {
+    busyMs,
+    totalTokens: total,
+    cacheHitPercent: turnCacheHitOf({ cacheReadTokens: cacheRead, outputTokens: output, totalTokens: total }),
+    turns: counted,
+  }
 }

@@ -108,7 +108,15 @@ export function apply(ctx: Context): void {
           return session === undefined ? null : readSessionTotals(session.projections)
         },
         hasOlder: (): boolean => binding?.session.getSnapshot().hasMore === true,
-        loadOlder: async (): Promise<void> => {
+        loadPage: async (): Promise<void> => {
+          if (binding === undefined) return
+          // One page, 50 messages, by the Session Controller's own pager. The
+          // range auto-load uses this rather than the call below because it can
+          // stop the moment the range is covered: asking for "7 days" should not
+          // drag a month of history in to answer a question about a week.
+          await binding.session.loadOlder()
+        },
+        loadAll: async (): Promise<void> => {
           if (binding === undefined) return
           // The host's own jump loader, aimed at the beginning of the session. It
           // pages backwards until the window covers the target, and it already

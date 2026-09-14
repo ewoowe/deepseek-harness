@@ -24,6 +24,16 @@ export interface CoverageProps {
   readonly outside: number
   /** Of the gap, turns whose usage the host's fold refuses to compute. */
   readonly withoutUsage: number
+  /**
+   * Whether a time range is showing turns that are OLDER than anything loaded.
+   *
+   * The numbers above cannot say this: under a range, `total` is the turns the
+   * window holds, so the gap they describe is zero even when the range reaches
+   * back past the loaded history. Without this flag a reader narrowing to "7
+   * days" would see a short table and no indication that it is short — the one
+   * reading this line exists to prevent.
+   */
+  readonly olderUnloaded: boolean
   /** Whether "load the full history" can make a difference right now. */
   readonly canLoad: boolean
   readonly loading: boolean
@@ -32,14 +42,15 @@ export interface CoverageProps {
 }
 
 export function Coverage({
-  covered, total, outside, withoutUsage, canLoad, loading, onLoad, t,
+  covered, total, outside, withoutUsage, olderUnloaded, canLoad, loading, onLoad, t,
 }: CoverageProps): ReactNode {
-  if (total <= covered) return null
+  if (total <= covered && !olderUnloaded) return null
   return (
     <div style={COVERAGE_STYLE}>
       <span>{t('coverage', { covered: String(covered), total: String(total) })}</span>
       {outside > 0 && <span>{t('outsideWindow', { count: String(outside) })}</span>}
       {withoutUsage > 0 && <span>{t('noUsage', { count: String(withoutUsage) })}</span>}
+      {olderUnloaded && <span>{t('rangeGap')}</span>}
       {canLoad && (
         <>
           <button

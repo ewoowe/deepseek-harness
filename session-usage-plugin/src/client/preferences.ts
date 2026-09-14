@@ -1,9 +1,11 @@
 /**
  * What this view remembers about its reader.
  *
- * Three facts, and they are the same kind of fact: which leaf the reader was on,
- * how they last ordered the per-message table, and how far down the page they
- * had read. All three were component state once, and all three reset silently.
+ * Five facts, and they are the same kind of fact: which leaf the reader was on,
+ * how they last ordered the per-message table, how far down the page they had
+ * read, which time range they had narrowed it to, and — when that range is the
+ * custom one — the two instants it spans. All five were component state once,
+ * and all five reset silently.
  *
  * The leaves are conditionally rendered, so switching leaves unmounts the table
  * and its sort went back to the window's own order; leaving the view entirely did
@@ -12,9 +14,9 @@
  * not merely forget the position, it showed a different part of a long table —
  * the reader who had paged down to a turn had to find it again every visit.
  *
- * One store for all three, rather than three files: the remembering is identical
+ * One store for all five, rather than five files: the remembering is identical
  * and only the key and the guard differ, and keeping the guard beside the store
- * is what stops the next preference from being added with none at all. A fourth
+ * is what stops the next preference from being added with none at all. A sixth
  * belongs here only if it is the same kind of fact — this view's own reader
  * state. Session data does not.
  *
@@ -27,11 +29,12 @@
  *
  * Not the settings scope. That seam is for a namespace the host validates and
  * shows in the settings UI, and neither which tab a reader was on, nor a table's
- * sort column, nor a scroll offset is something they would go looking for there;
- * binding it would also make this view wait on a service several hosts do not
- * load.
+ * sort column, nor a scroll offset, nor a time range is something they would go
+ * looking for there; binding it would also make this view wait on a service
+ * several hosts do not load.
  */
 import { useEffect, useSyncExternalStore, type RefObject } from 'react'
+import { parseRange, type CustomRange, type RangeKey } from './time-range.ts'
 
 /** The leaves of the usage view. */
 export type Leaf = 'models' | 'messages'
@@ -55,6 +58,8 @@ const KEYS: readonly SortKey[] = ['when', 'input', 'output', 'busy', 'cache']
 const SORT_KEY = 'dsh-session-usage.message-sort'
 const LEAF_KEY = 'dsh-session-usage.leaf'
 const SCROLL_KEY = 'dsh-session-usage.scroll'
+const RANGE_KEY = 'dsh-session-usage.range'
+const CUSTOM_KEY = 'dsh-session-usage.custom-range'
 
 /**
  * Read a stored string, or null.
@@ -214,6 +219,38 @@ const sortStore = remember<Sort | null>(SORT_KEY, parseSort)
 /** Which leaf the view was last on. */
 const leafStore = remember<Leaf>(LEAF_KEY, parseLeaf)
 
+/** The time range the view was last narrowed to. */
+const rangeStore = remember<RangeKey>(RANGE_KEY, parseRange)
+
+/**
+ * Read a stored custom span back.
+ *
+ * Both ends are numbers or nothing: a value that is not a finite instant cannot
+ * bound anything, and would compare as `NaN` — which filters nothing out rather
+ * than everything. A start is required (a span with only an end is not a span
+ * this view can show), while a missing end means "until now", the same open end
+ * every other range uses.
+ * @param text - the raw stored string, or null when nothing is stored.
+ * @returns the span, or null when nothing usable is stored.
+ */
+export function parseCustomRange(text: string | null): CustomRange | null {
+  if (text === null) return null
+  let raw: unknown
+  try {
+    raw = JSON.parse(text)
+  } catch {
+    return null
+  }
+  if (typeof raw !== 'object' || raw === null) return null
+  const { from, to } = raw as { from?: unknown; to?: unknown }
+  if (typeof from !== 'number' || !Number.isFinite(from)) return null
+  if (to !== null && (typeof to !== 'number' || !Number.isFinite(to))) return null
+  return { from, to: to as number | null }
+}
+
+/** The reader's own span, when the custom range is the one showing. */
+const customStore = remember<CustomRange | null>(CUSTOM_KEY, parseCustomRange)
+
 /**
  * The sort to order the table by.
  * @returns the remembered sort, or null for the window's own order.
@@ -260,6 +297,57 @@ export function writeLeaf(next: Leaf): void {
  */
 export function useLeaf(): Leaf {
   return useRemembered(leafStore)
+}
+
+/**
+ * The time range the view is narrowed to.
+ * @returns the remembered range.
+ */
+export function getRange(): RangeKey {
+  return rangeStore.get()
+}
+
+/**
+ * Remember which time range is showing.
+ * @param next - the range to keep.
+ */
+export function writeRange(next: RangeKey): void {
+  rangeStore.set(next)
+}
+
+/**
+ * The remembered range, as React state.
+ * @returns the range to narrow the tables to.
+ */
+export function useRange(): RangeKey {
+  return useRemembered(rangeStore)
+}
+
+/**
+ * The span the custom range is showing, or null while none is set.
+ * @returns the remembered span.
+ */
+export function getCustomRange(): CustomRange | null {
+  return customStore.get()
+}
+
+/**
+ * Remember the custom span — or, with null, that none is set.
+ *
+ * The null reaches storage as a removal rather than as the string `"null"`; the
+ * store handles that for every preference alike.
+ * @param next - the span to keep, or null to clear it.
+ */
+export function writeCustomRange(next: CustomRange | null): void {
+  customStore.set(next)
+}
+
+/**
+ * The remembered custom span, as React state.
+ * @returns the span, or null while none is set.
+ */
+export function useCustomRange(): CustomRange | null {
+  return useRemembered(customStore)
 }
 
 /**
