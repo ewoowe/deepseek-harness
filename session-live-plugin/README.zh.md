@@ -2,8 +2,9 @@
 
 [English](README.md) | 中文
 
-> **状态：规划中，尚未实现。** 本目录目前只有这份说明——没有源码、没有 `package.json`、
-> 没有构建脚本。下面写的是**准备做什么**与**能做到什么程度**，不是已完成的事实。
+> **状态：已实现（第 1–7 项）。** 插件已构建、已装入 `web` profile，作为一个 `Live` 会话视图渲染。
+> 第 8 项没有写一行代码就定了：`estimate.ts` 是 `contextBreakdown` 投影已经在用的固定密度启发式，
+> 且任何公开入口都取不到它，所以实时占用由图 4 的那个投影给出，而不是本插件自己再立一套计数规则。
 
 单次会话的**实时**统计：这个会话**此刻**在做什么。
 
@@ -19,20 +20,20 @@
 | 数字何时准 | 轮次**结束**后（宿主折叠对进行中的轮次 fail closed） | 进行中也要有东西可看 |
 | 更新方式 | 2 秒轮询 | **事件驱动**（事件窗自带 `revision` 变更计数） |
 
-## 准备实现什么
+## 实现了什么
 
 | # | 内容 | 数据来源 | 状态 |
 |---|---|---|---|
-| 1 | **步级明细**：一轮展开成若干步，各自的请求与工具 | `step/start` · `step/end` | 现成数据 ✓ |
-| 2 | **工具调用统计**：次数、耗时、最慢的是哪个 | `tool/call` → `tool/result` 成对相减 | 现成数据 ✓ |
-| 3 | **耗时构成**：模型 vs 工具 vs 其它 | 投影 `sessionStats.llmMs` / `toolMs`（官方拆分） | 现成数据 ✓ |
-| 4 | **上下文占用**：快满了没有 | 投影 `contextPressure` / `contextBreakdown` | 现成数据 ✓ |
-| 5 | **吞吐**：每轮 / 每步的 tok/s | 该轮 usage ÷ 该轮墙钟 | 现成数据 ✓ |
-| 6 | **模型与尝试轨迹**：一轮里换过几次路由 | 该轮 `usage.routes`（含每次尝试） | 现成数据 ✓ |
-| 7 | **实时事件流**：像 `tail -f` 那样看最近 N 个事件 | 事件窗的 `entries` | 现成数据 ✓ |
-| 8 | **进行中轮次的 token**（边跑边涨） | `token-meter` 的 `estimate.ts`——**待确认** | 见下 |
+| 1 | **步级明细**：一轮展开成若干步，各自的请求与工具 | `step/start` · `step/end` | 已实现 |
+| 2 | **工具调用统计**：次数、耗时、最慢的是哪个 | `tool/call` → `tool/result` 成对相减 | 已实现 |
+| 3 | **耗时构成**：模型 vs 工具 vs 其它 | 投影 `sessionStats.llmMs` / `toolMs`（官方拆分） | 已实现 |
+| 4 | **上下文占用**：快满了没有 | 投影 `contextPressure`（`contextWindow` / `pressureTokens` / `projectedTokens`） | 已实现 |
+| 5 | **吞吐**：每轮 / 每步的 tok/s | 该轮 usage ÷ 该轮墙钟 | 已实现（官方折叠对进行中的轮次 fail closed，那一行因此显示为未知） |
+| 6 | **模型与尝试轨迹**：一轮里换过几次路由 | 该轮 `usage.routes`，回退到该轮的 assistant 消息 | 已实现 |
+| 7 | **实时事件流**：像 `tail -f` 那样看最近 N 个事件 | 事件窗的 `entries`，含流式 chunk | 已实现 |
+| 8 | **进行中轮次的 token**（边跑边涨） | `token-meter` 的 `estimate.ts` | **未做**——并入第 4 项；见下 |
 
-前七项**只用宿主已经发布的数据**，第八项要先确认官方有没有估算口径。
+第 1–7 项**只用宿主已经发布的数据**。第 8 项不是漏掉的功能，而是一个决定，理由见下。
 
 ## 数据从哪来
 
@@ -47,17 +48,20 @@
 
 ## 已知边界
 
-- **进行中的轮次没有官方用量。** `token-meter/turn-usage.ts` 写明是"一个**已完成** Turn 的精确
-  记账"，且对进行中的轮次 fail closed——这正是 `session-usage` 表格里那一行显示「—」的原因。
-- **`estimate.ts` 尚未读过。** 它是 `token-meter` 里的"估算"。若它正是官方为进行中轮次准备的
-  口径，实时数字就由它提供；**若读下来发现它不适用于此，这一项就不做**——绝不为"实时"自己造第二套
-  口径，那正是本仓库反复吃过的亏。
-- **工具事件的细分类型未逐一确认**：已知 `tool/call`、`tool/result`，另有 `tool/bash-sample`、
-  `tool/client`、`tool/ptc-dispatch` 等；哪些属于统计、哪些属于流式采样，实现时再逐个定。
-- **只覆盖已加载窗口**，与 `session-usage` 同一限制、同一条补载路径（逐页往前拉，覆盖即停，
-  载入不回缩）。
-- **事件驱动更新需要确认订阅入口**：窗口有 `revision` 变更计数（`turn-facts.ts` 已用它判断
-  "窗口动没动"），但"订阅"的读口还没查。
+- **进行中的轮次没有官方用量。** `turn-usage.ts` 写明是"一个**已完成** Turn 的精确记账"，且对进行中
+  的轮次 fail closed。本插件不绕开这一点：进行中的轮次 `usage` 报 `null`，它的吞吐行显示为未知。
+- **第 8 项读过了 `estimate.ts`，结论是"不做"。** 它按固定密度估算（4 字符 ≈ 1 token，外加每个块的
+  固定框架开销），是给**请求**定价用的，不是给实时流用的；而且任何公开入口都取不到它——`token-meter`
+  的 `index.ts` 只导出 `TokenMeter` 服务与类型，`client.ts` 只导出 `deriveTurnTokenUsage`。唯一的通路是
+  `./src/*` 源码直通，第三方 bundle 用不了（浏览器模块表永远不会应答那个 specifier）。它真正可达的地方
+  是 `contextBreakdown` 投影（它就是基于 `estimateToolsTokens` 建的），所以占用改由 `contextPressure`
+  给出（第 4 项）。
+- **只覆盖已加载窗口**，与 `session-usage` 同一限制、同一条补载路径（宿主自己的 jump loader，瞄向会话
+  开头，自带"无进展"保护）。
+- **刷新是事件驱动的，但刻意保留了一个秒级定时器。** 事件到达即刻重渲染——`SessionEventSource` 就是
+  `ObservableSnapshot`，订阅入口本来就是有的。旁边那个 1 秒 tick 覆盖事件窗给不了的两件事：投影只暴露
+  `getSnapshot`（没有订阅），而一个正在等模型的步骤**完全不会产生事件**，它的耗时否则会冻在屏幕上并且
+  越错越多。空闲会话上一次 tick 只花一次比较，React 会直接跳过渲染。
 
 ## 命名
 
@@ -73,11 +77,23 @@
 避开的命名：`session-trace`（撞宿主的 `trajectory` 轨迹视图）、`session-meter`（撞宿主包
 `token-meter`）、`session-runtime`（与"运行时"这个技术词歧义）。
 
-## 下一步
+## 目录
 
-1. 照 `session-usage-plugin/` 的模板建 `package.json`、`build.mjs`、`tsconfig.json`、
-   `cordis.patch.yml`，让插件能被 profile 装载
-2. 先做**第 1–4 项**（全是现成数据，风险最低）：步级明细、工具统计、耗时构成、上下文占用
-3. 再读 `estimate.ts`，决定第 8 项做不做
-4. 最后做第 7 项事件流
-5. 每完成一步提交一次，README 随实现推进更新（**这份文档里的"状态"列必须跟着改**）
+| 文件 | 职责 |
+|---|---|
+| `src/index.ts` | Node 半——只有身份，没有可安装的东西 |
+| `src/client/index.ts` | 注册 `conversation.view` 条目并注入读取面 |
+| `src/client/live-facts.ts` | 把事件窗折叠成 轮次 → 步骤 → 工具调用，外加事件流 |
+| `src/client/live-projection.ts` | 读 `contextPressure` / `sessionStats` / `tokenUsage`，以及格式化 |
+| `src/client/LiveView.tsx` | 视图：上下文条、汇总、步骤列表、事件流 |
+
+`build.mjs` 与 `tsconfig.json` 刻意照 `session-usage-plugin/`，包括它注释里论证过的两个选择：
+tsconfig 不用 `paths`（把宿主 import 指到 `../packages/*/src` 会把宿主自己的类型劈成两个标称不同的
+面），以及浏览器 external 用**白名单**而不是"凡裸标识符皆 external"（模块表只应答 `react` /
+`react-dom`；其余任何被 externalize 的都会变成启动失败，而不是一个刚好能用的打包依赖）。
+
+## 已知缺口
+
+工具事件的细分类型没有逐一枚举：只折叠了 `tool/call` 与 `tool/result`，其余（`tool/bash-sample`、
+`tool/client`、`tool/ptc-dispatch` 等）按"采样而非统计"跳过。若其中某个其实是应当配对的调用型事件，
+步骤的工具列表就是它的归属。

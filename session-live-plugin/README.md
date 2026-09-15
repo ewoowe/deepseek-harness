@@ -2,9 +2,11 @@
 
 English | [中文](README.zh.md)
 
-> **Status: planned, not implemented.** This directory currently holds this document only —
-> no source, no `package.json`, no build script. What follows is what this plugin is *going*
-> to do and how far it can honestly go, not what it does.
+> **Status: implemented (items 1–7).** The plugin is built, installed into the `web` profile, and
+> renders as a `Live` conversation view. Item 8 was settled without code: `estimate.ts` is the
+> fixed-density heuristic the `contextBreakdown` projection is already built on, and it is not
+> reachable from any public entry point, so the live occupancy figure comes from that projection
+> (item 4) rather than from a second counting rule of this plugin's own.
 
 Live statistics for a single session: what the conversation is doing **right now**.
 
@@ -21,21 +23,21 @@ thing:
 | When the figures are exact | after the turn **ends** (the host's fold fails closed on a running one) | there has to be something to read while it runs |
 | Refresh | a 2-second poll | **event-driven** (the window carries its own `revision` counter) |
 
-## What it will implement
+## What it implements
 
 | # | Content | Source | Status |
 |---|---|---|---|
-| 1 | **Step detail**: a turn expanded into its steps, each with its request and tools | `step/start` · `step/end` | data on hand ✓ |
-| 2 | **Tool statistics**: calls, duration, which one is slowest | paired `tool/call` → `tool/result` | data on hand ✓ |
-| 3 | **Where the time went**: model vs tools vs the rest | projections `sessionStats.llmMs` / `toolMs` (the host's own split) | data on hand ✓ |
-| 4 | **Context occupancy**: how full it is | projections `contextPressure` / `contextBreakdown` | data on hand ✓ |
-| 5 | **Throughput**: tokens/s per turn and per step | that turn's usage ÷ its wall time | data on hand ✓ |
-| 6 | **Model and attempt trail**: how many routes one turn went through | that turn's `usage.routes` | data on hand ✓ |
-| 7 | **Live event stream**: `tail -f` over the last N events | the window's `entries` | data on hand ✓ |
-| 8 | **A running turn's tokens** (growing as it streams) | `token-meter`'s `estimate.ts` — **unconfirmed** | see below |
+| 1 | **Step detail**: a turn expanded into its steps, each with its request and tools | `step/start` · `step/end` | shipped |
+| 2 | **Tool statistics**: calls, duration, which one is slowest | paired `tool/call` → `tool/result` | shipped |
+| 3 | **Where the time went**: model vs tools vs the rest | projections `sessionStats.llmMs` / `toolMs` (the host's own split) | shipped |
+| 4 | **Context occupancy**: how full it is | projection `contextPressure` (`contextWindow` / `pressureTokens` / `projectedTokens`) | shipped |
+| 5 | **Throughput**: tokens/s per turn and per step | that turn's usage ÷ its wall time | shipped (the fold fails closed on a running turn, so that row reads as unknown) |
+| 6 | **Model and attempt trail**: how many routes one turn went through | that turn's `usage.routes`, falling back to its assistant messages | shipped |
+| 7 | **Live event stream**: `tail -f` over the last N events | the window's `entries`, transient chunks included | shipped |
+| 8 | **A running turn's tokens** (growing as it streams) | `token-meter`'s `estimate.ts` | **not built** — folded into item 4; see below |
 
-The first seven read only what the host already publishes. The eighth depends on whether an
-official estimate exists.
+Items 1–7 read only what the host already publishes. Item 8 is not a missing feature but a
+decision, and the reasoning is below.
 
 ## Where the data comes from
 
@@ -52,21 +54,25 @@ the same rule the other two plugins follow:
 
 ## Known limits
 
-- **A running turn has no official usage.** `token-meter/turn-usage.ts` states it accounts for
-  "every attempt in one **completed** Turn" and fails closed otherwise — which is exactly why
-  the usage table shows a dash for the turn in flight.
-- **`estimate.ts` has not been read yet.** It is the "estimate" in `token-meter`. If it turns
-  out to be the official answer for a running turn, it supplies the live figure; **if it does
-  not fit this use, that row will not be built** — inventing a second counting rule is the one
-  mistake this repository keeps rediscovering.
-- **The tool event subtypes are not all confirmed**: `tool/call` and `tool/result` are known,
-  and `tool/bash-sample`, `tool/client`, `tool/ptc-dispatch` and others exist; which are
-  statistics and which are sampling gets settled during implementation.
-- **Only the loaded window is covered**, the same limit as `session-usage` and the same way out
-  of it (pages pulled backwards, stopping once covered, and the load never shrinks back).
-- **Event-driven refresh needs a subscription entry point confirmed**: the window has a
-  `revision` counter (`turn-facts.ts` already compares it), but the subscribe side is not yet
-  located.
+- **A running turn has no official usage.** `turn-usage.ts` states it accounts for "every attempt
+  in one **completed** Turn" and fails closed otherwise. This plugin does not work around that:
+  a turn in flight reports `usage: null` and its throughput row reads as unknown.
+- **Item 8 was resolved by reading `estimate.ts`, and the answer is "do not build it".** It is a
+  fixed-density heuristic (4 characters ≈ 1 token, plus fixed per-block framing) used for
+  pricing a REQUEST, not a live stream — and it is exported from no public entry point:
+  `token-meter`'s `index.ts` exposes only the `TokenMeter` service and types, and its `client.ts`
+  exposes only `deriveTurnTokenUsage`. The one way in is the `./src/*` source passthrough, which
+  a third-party bundle cannot use (the browser module table would never answer that specifier).
+  What the heuristic IS reachable through is the `contextBreakdown` projection, which is built on
+  `estimateToolsTokens` — so occupancy is reported from `contextPressure` (item 4) instead.
+- **Only the loaded window is covered**, the same limit as `session-usage` and the same way out of
+  it (the host's own jump loader, aimed at the session's beginning, with its no-progress guard).
+- **Refresh is event-driven, with one deliberate second timer.** An arriving event re-renders the
+  pane immediately — `SessionEventSource` is an `ObservableSnapshot`, so `subscribe` was there
+  after all. The one-second tick beside it covers the two facts the window cannot deliver: the
+  projections expose only `getSnapshot` (no subscribe), and a step waiting on a model emits no
+  events at all, so its elapsed time would otherwise freeze on screen while being wrong by a
+  growing amount. A tick over an idle session costs one comparison and React bails out.
 
 ## Naming
 
@@ -83,11 +89,26 @@ Names deliberately avoided: `session-trace` (collides with the host's `trajector
 `session-meter` (collides with the host package `token-meter`), `session-runtime` (ambiguous
 with the ordinary technical sense of "runtime").
 
-## Next steps
+## Layout
 
-1. Copy the shape of `session-usage-plugin/` for `package.json`, `build.mjs`, `tsconfig.json`
-   and `cordis.patch.yml`, so the profile can mount it
-2. Build rows **1–4** first — all of them read data already on hand
-3. Read `estimate.ts` and decide on row 8
-4. Build row 7, the event stream, last
-5. Commit per step, and keep this document's **Status** column true as the code lands
+| File | Role |
+|---|---|
+| `src/index.ts` | Node half — identity only; nothing to install |
+| `src/client/index.ts` | Registers the `conversation.view` entry and injects the read face |
+| `src/client/live-facts.ts` | Folds the event window into turns → steps → tool calls, plus the stream |
+| `src/client/live-projection.ts` | Reads `contextPressure` / `sessionStats` / `tokenUsage`, and the formatters |
+| `src/client/LiveView.tsx` | The view: context bar, totals, step list, event stream |
+
+`build.mjs` and `tsconfig.json` follow `session-usage-plugin/` deliberately, including the two
+choices its comments argue for: no `paths` in the tsconfig (routing host imports at
+`../packages/*/src` splits the host's own types across two nominally different planes), and a
+browser-externals WHITELIST rather than "everything bare" (the module table answers only
+`react` / `react-dom`; anything else externalised becomes a boot failure instead of a bundled
+dependency that simply works).
+
+## Known gaps
+
+Tool event subtypes are not enumerated: only `tool/call` and `tool/result` are folded, and the
+others (`tool/bash-sample`, `tool/client`, `tool/ptc-dispatch`, …) are skipped as sampling rather
+than statistics. If one of them turns out to be a call-shaped event this fold should pair, the
+step's tool list is where it belongs.
