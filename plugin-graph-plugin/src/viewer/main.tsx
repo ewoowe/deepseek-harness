@@ -124,5 +124,15 @@ function Viewer(): ReactNode {
   })
 }
 
+// The page's color scheme follows the app's, reported through the URL the panel
+// opened this page with. Applied at module scope BEFORE the first render: a theme
+// that flips a frame after paint is a visible flash, and the tokens this page
+// loads switch on this very attribute.
+const scheme = new URLSearchParams(window.location.search).get('scheme') === 'light'
+  ? 'light'
+  : 'dark'
+document.documentElement.style.colorScheme = scheme
+document.body.toggleAttribute('data-ds-dark-theme', scheme === 'dark')
+
 const host = document.getElementById('root')
 if (host !== null) createRoot(host).render(createElement(Viewer))

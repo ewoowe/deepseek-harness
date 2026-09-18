@@ -9,7 +9,7 @@
  * `config: false` is required — without it every call still probes for a
  * config file and re-enters the failing import.
  */
-import { readFileSync } from 'node:fs'
+import { copyFileSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { build } from 'tsdown'
 
@@ -200,5 +200,16 @@ await build({
 // modes this guards were silent until a page tried to load them.
 assertBrowserPurity(`${ROOT}lib/client.js`)
 assertBrowserPurity(`${ROOT}lib/viewer.js`)
+
+// The design tokens for the standalone viewer, copied from the theme package so
+// both surfaces share ONE source of truth — light and dark included, switched by
+// `body[data-ds-dark-theme]` exactly as the app switches them. Copied at build
+// time rather than resolved at serve time: the theme package is not a dependency
+// of this plugin, so a runtime resolution would depend on where the host happened
+// to install things. The cost is that the copy is only as fresh as the last build.
+copyFileSync(
+  new URL('../packages/client/ui-theme/src/styles/design-platform.css', import.meta.url),
+  new URL('./lib/theme.css', import.meta.url),
+)
 
 console.log('plugin-graph-plugin: built lib/index.js, lib/client.js and lib/viewer.js')

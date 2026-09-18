@@ -39,7 +39,7 @@ export const name = 'plugin-graph'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { collectGraph } from './collect.ts'
-import { CLIENT_GRAPH_PATH, GRAPH_PATH, VIEWER_PATH, VIEWER_SCRIPT_PATH } from './graph-types.ts'
+import { CLIENT_GRAPH_PATH, GRAPH_PATH, THEME_CSS_PATH, VIEWER_PATH, VIEWER_SCRIPT_PATH } from './graph-types.ts'
 // Only the report itself: `PluginGraph` is re-exported below, and importing the
 // name here as well is a duplicate identifier.
 import type { ClientGraphReport } from './graph-types.ts'
@@ -65,6 +65,8 @@ export type {
  * to be started in, and `viewer.js` is its sibling in that same `lib/`.
  */
 const VIEWER_SCRIPT = fileURLToPath(new URL('./viewer.js', import.meta.url))
+/** The design tokens copied at build time, served beside the viewer. */
+const THEME_CSS = fileURLToPath(new URL('./theme.css', import.meta.url))
 
 
 /**
@@ -150,6 +152,18 @@ export function apply(ctx: Context): void {
         res.end(script)
       },
     }), 'plugin-graph: viewer script')
+
+    // The design tokens the panel styles itself with — light and dark, both
+    // from the theme package. Read per request like the viewer script, so a
+    // rebuild takes effect on reload without a host restart.
+    scope.effect(() => scope.webServer.register({
+      kind: 'exact',
+      path: THEME_CSS_PATH,
+      handler: (_req, res) => {
+        res.setHeader('content-type', 'text/css; charset=utf-8')
+        res.end(readFileSync(THEME_CSS, 'utf8'))
+      },
+    }), 'plugin-graph: design tokens')
 
     // The browser half's tree, one way: the app POSTs what it collected, the
     // viewer GETs it. This exists because the standalone viewer is a document

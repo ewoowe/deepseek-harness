@@ -169,8 +169,12 @@ export function GraphPanel({
               type="button"
               style={REFRESH_STYLE}
               // `noopener`: same-origin, but a fresh document has no business
-              // reaching back through `window.opener`.
-              onClick={() => { window.open(viewerPath, '_blank', 'noopener') }}
+              // reaching back through `window.opener`. The scheme travels in the
+              // URL because the viewer cannot read this runtime's theme itself.
+              onClick={() => {
+                const dark = document.body.hasAttribute('data-ds-dark-theme')
+                window.open(`${viewerPath}?scheme=${dark ? 'dark' : 'light'}`, '_blank', 'noopener')
+              }}
             >
               {t('openInTab')}
             </button>

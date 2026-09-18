@@ -26,6 +26,16 @@ export const VIEWER_PATH = '/dsh-plugin-graph/view'
 export const VIEWER_SCRIPT_PATH = '/dsh-plugin-graph/viewer.js'
 
 /**
+ * Path of the design tokens, served beside the viewer page.
+ *
+ * The panel styles itself with the app's `--dsw-*` custom properties, which the
+ * app's theme defines — the same file the app loads, copied here at build time so
+ * the two surfaces share one source of truth. The served page keeps a small
+ * fallback of its own for the case where this file is missing.
+ */
+export const THEME_CSS_PATH = '/dsh-plugin-graph/theme.css'
+
+/**
  * Path the browser half reports its graph to, and the viewer reads it from.
  *
  * One path, two methods: the app POSTs what it collected, the viewer GETs it. The

@@ -6,13 +6,13 @@
  * package and resolved relative to the built module — more moving parts than the
  * thing it holds.
  *
- * The stylesheet's real job is the design tokens. The panel styles itself with
- * the app's `--dsw-*` custom properties, which the app's theme defines; this page
- * has no theme, so it stands in as one. The list below is exactly the set the
- * panel references, which is why it is short — a token added to a component but
- * not here shows up as an unstyled property, not as a build error.
+ * The tokens themselves come from the theme package, served at THEME_CSS_PATH by
+ * the Node half — light and dark, switched by `body[data-ds-dark-theme]`, the
+ * same attribute the app's own boot script toggles. What remains in this page's
+ * stylesheet is the shell: the initial color scheme for the moment before the
+ * script applies the app's own, and the padding.
  */
-import { VIEWER_SCRIPT_PATH } from './graph-types.ts'
+import { THEME_CSS_PATH, VIEWER_SCRIPT_PATH } from './graph-types.ts'
 
 /**
  * Build the document.
@@ -26,17 +26,7 @@ export function viewerPage(): string {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>dsh plugin graph</title>
 <style>
-:root {
-  color-scheme: dark;
-  --dsw-alias-bg-layer-1: #1b1b1d;
-  --dsw-alias-bg-layer-2: #26262a;
-  --dsw-alias-border-l2: #3a3a40;
-  --dsw-alias-label-primary: #ececef;
-  --dsw-alias-label-secondary: #a8a8b0;
-  --dsw-alias-label-tertiary: #74747e;
-  --dsw-alias-state-success-primary: #4cc38a;
-  --dsw-alias-state-error-primary: #e5534b;
-}
+:root { color-scheme: dark; }
 * { box-sizing: border-box; }
 html, body { height: 100%; margin: 0; }
 body {
@@ -46,6 +36,8 @@ body {
 }
 #root { padding: 16px; }
 </style>
+<!-- AFTER the shell style, so the theme's tokens win wherever they overlap it. -->
+<link rel="stylesheet" href="${THEME_CSS_PATH}">
 </head>
 <body>
 <div id="root"></div>
