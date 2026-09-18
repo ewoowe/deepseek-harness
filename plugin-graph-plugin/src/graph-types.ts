@@ -26,6 +26,16 @@ export const VIEWER_PATH = '/dsh-plugin-graph/view'
 export const VIEWER_SCRIPT_PATH = '/dsh-plugin-graph/viewer.js'
 
 /**
+ * Path the browser half reports its graph to, and the viewer reads it from.
+ *
+ * One path, two methods: the app POSTs what it collected, the viewer GETs it. The
+ * handoff exists because the standalone viewer is a document the Node half serves
+ * and has no client Cordis of its own — the app is the only half that can see that
+ * runtime, so it is the only half that can describe it.
+ */
+export const CLIENT_GRAPH_PATH = '/dsh-plugin-graph/client'
+
+/**
  * One service a plugin injects, and what its declaration gates.
  *
  * A plugin can acquire services two ways, and the difference is not cosmetic:
@@ -99,6 +109,20 @@ export interface IsolatedService {
   readonly service: string
   /** Entry ids providing it, one per isolation label. */
   readonly providers: readonly string[]
+}
+
+/**
+ * The browser half's graph, as reported for the standalone viewer to show.
+ *
+ * A snapshot WITH the instant it was taken, not a live read: the viewer cannot
+ * collect this tree itself, so what it shows is "the browser runtime as of the
+ * last time the app looked". Printing that instant is the difference between
+ * a snapshot and a lie — a graph a reader believes is current but is not.
+ */
+export interface ClientGraphReport {
+  readonly graph: PluginGraph
+  /** When the app collected it, epoch milliseconds. */
+  readonly at: number
 }
 
 /** The whole graph, as the browser half reads it. */

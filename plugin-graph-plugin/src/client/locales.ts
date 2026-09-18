@@ -8,6 +8,7 @@ export type MessagesKey =
   | 'title'
   | 'intro'
   | 'introClient'
+  | 'clientCollectedAt'
   | 'scopeHost'
   | 'scopeClient'
   | 'refresh'
@@ -50,6 +51,7 @@ const en: Record<MessagesKey, string> = {
   title: 'Plugin graph',
   intro: 'Which plugin provides the services every other plugin injects, read from the live Cordis runtime.',
   introClient: 'The browser half is a separate Cordis runtime with its own plugins and its own service names. The two graphs are not comparable and are never merged — a merged one would be a wrong one, not a bigger one.',
+  clientCollectedAt: 'Browser tree collected {when}.',
   scopeHost: 'Host',
   scopeClient: 'Browser',
   refresh: 'Refresh',
@@ -93,6 +95,7 @@ const zh: Record<MessagesKey, string> = {
   title: '插件依赖图',
   intro: '哪个插件提供了其他插件所注入的服务，数据读自运行中的 Cordis 运行时。',
   introClient: '浏览器侧是另一套 Cordis 运行时：不同的插件、不同的服务名。两张图不可比较、也不合并——合并出来的不是更大的图，而是错的图。',
+  clientCollectedAt: '浏览器侧的树采集于 {when}。',
   scopeHost: '宿主',
   scopeClient: '浏览器',
   refresh: '刷新',

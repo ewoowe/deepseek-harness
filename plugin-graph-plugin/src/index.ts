@@ -39,7 +39,10 @@ export const name = 'plugin-graph'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { collectGraph } from './collect.ts'
-import { GRAPH_PATH, VIEWER_PATH, VIEWER_SCRIPT_PATH } from './graph-types.ts'
+import { CLIENT_GRAPH_PATH, GRAPH_PATH, VIEWER_PATH, VIEWER_SCRIPT_PATH } from './graph-types.ts'
+// Only the report itself: `PluginGraph` is re-exported below, and importing the
+// name here as well is a duplicate identifier.
+import type { ClientGraphReport } from './graph-types.ts'
 import type {
   GraphEdge, GraphInjection, GraphNode, IsolatedService, PluginGraph, UnresolvedDependency,
 } from './graph-types.ts'
@@ -73,6 +76,40 @@ const VIEWER_SCRIPT = fileURLToPath(new URL('./viewer.js', import.meta.url))
  * viewer takes effect on a reload instead of requiring the host to restart.
  * @param ctx - host context.
  */
+/**
+ * The browser half's last report, or null before any app has sent one.
+ *
+ * Held in memory rather than written down: it describes a runtime that only
+ * exists while a page is open, so a report surviving a host restart would be
+ * describing something that is not there.
+ */
+let clientReport: ClientGraphReport | null = null
+
+/**
+ * Accept a report only if it has the shape the viewer will render.
+ *
+ * This arrives over HTTP from a same-origin page rather than from our own code,
+ * so it is input: a malformed one would not fail here, it would fail in the
+ * viewer's canvas with a stack the reader cannot act on. Checking the top-level
+ * arrays is enough to keep that from happening, and cheap enough to do on every
+ * request.
+ * @param value - the parsed request body.
+ * @returns the report, or null when it is not one.
+ */
+function asReport(value: unknown): ClientGraphReport | null {
+  if (typeof value !== 'object' || value === null) return null
+  const { graph, at } = value as { graph?: unknown; at?: unknown }
+  if (typeof at !== 'number' || !Number.isFinite(at)) return null
+  if (typeof graph !== 'object' || graph === null) return null
+  const candidate = graph as Partial<Record<'nodes' | 'edges' | 'unresolved' | 'isolated', unknown>>
+  for (const field of ['nodes', 'edges', 'unresolved', 'isolated'] as const) {
+    if (!Array.isArray(candidate[field])) return null
+  }
+  // Named through the report's own field rather than by importing the graph type,
+  // which this module re-exports under the same name.
+  return { graph: graph as ClientGraphReport['graph'], at }
+}
+
 export function apply(ctx: Context): void {
   ctx.inject(['loader', 'webServer'], (scope: Context) => {
     scope.effect(() => scope.webServer.register({
@@ -113,5 +150,53 @@ export function apply(ctx: Context): void {
         res.end(script)
       },
     }), 'plugin-graph: viewer script')
+
+    // The browser half's tree, one way: the app POSTs what it collected, the
+    // viewer GETs it. This exists because the standalone viewer is a document
+    // this half serves and has no client Cordis of its own — the app is the only
+    // half that can see that runtime, so it is the only half that can describe
+    // it. A GET before any report is a 404 rather than an empty graph: "nobody
+    // has looked yet" and "there is nothing there" are different answers.
+    scope.effect(() => scope.webServer.register({
+      kind: 'exact',
+      path: CLIENT_GRAPH_PATH,
+      handler: (req, res) => {
+        if (req.method === 'GET') {
+          if (clientReport === null) {
+            res.statusCode = 404
+            res.setHeader('content-type', 'text/plain; charset=utf-8')
+            res.end('plugin-graph: no browser graph has been reported yet\n')
+            return
+          }
+          res.setHeader('content-type', 'application/json; charset=utf-8')
+          res.end(JSON.stringify(clientReport))
+          return
+        }
+        if (req.method !== 'POST') {
+          res.statusCode = 405
+          res.end()
+          return
+        }
+        let body = ''
+        req.setEncoding('utf8')
+        req.on('data', (chunk: string) => { body += chunk })
+        req.on('end', () => {
+          let report: ClientGraphReport | null = null
+          try {
+            report = asReport(JSON.parse(body) as unknown)
+          } catch {
+            report = null
+          }
+          if (report === null) {
+            res.statusCode = 400
+            res.end()
+            return
+          }
+          clientReport = report
+          res.statusCode = 204
+          res.end()
+        })
+      },
+    }), 'plugin-graph: client graph route')
   })
 }

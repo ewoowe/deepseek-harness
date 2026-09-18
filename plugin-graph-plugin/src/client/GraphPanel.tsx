@@ -22,8 +22,9 @@
  */
 import { useCallback, useEffect, useState, type CSSProperties, type ReactNode } from 'react'
 import {
+  CLIENT_GRAPH_PATH,
   GRAPH_PATH,
-  type GraphEdge, type GraphInjection, type GraphNode, type PluginGraph,
+  type ClientGraphReport, type GraphEdge, type GraphInjection, type GraphNode, type PluginGraph,
 } from '../graph-types.ts'
 import { GraphCanvas } from './graph-canvas.tsx'
 import type { Translate } from './locales.ts'
@@ -50,6 +51,15 @@ export interface GraphPanelProps {
    */
   readonly clientGraph?: () => PluginGraph
   /**
+   * When the supplied browser graph was collected, or null/undefined when unknown.
+   *
+   * Shown beside the browser graph because that graph may be a SNAPSHOT rather
+   * than a live read — in the standalone viewer it always is, since that page
+   * cannot collect the tree itself. A graph a reader believes is current but is
+   * not is worse than one that admits its age.
+   */
+  readonly clientGraphAt?: number | null
+  /**
    * Height of the drawing area in px, or undefined for the canvas's own default.
    * The viewer sizes it to the window; a settings column wants a fixed panel.
    */
@@ -62,7 +72,9 @@ type Load =
   | { readonly kind: 'failed' }
   | { readonly kind: 'ready'; readonly graph: PluginGraph }
 
-export function GraphPanel({ t, viewerPath, clientGraph, canvasHeight }: GraphPanelProps): ReactNode {
+export function GraphPanel({
+  t, viewerPath, clientGraph, clientGraphAt, canvasHeight,
+}: GraphPanelProps): ReactNode {
   const [load, setLoad] = useState<Load>({ kind: 'loading' })
   const [selected, setSelected] = useState<string | null>(null)
   const [scope, setScope] = useState<Scope>('host')
@@ -91,6 +103,36 @@ export function GraphPanel({ t, viewerPath, clientGraph, canvasHeight }: GraphPa
     })()
     // Re-reads when the scope changes, because `refresh` is that scope's read.
   }, [scope, clientGraph])
+
+  /**
+   * Hand the browser tree to the host, so the standalone viewer can show it.
+   *
+   * Fire and forget: this view already has the graph on screen, and the report
+   * only reaches a page the reader may open later — a failure changes nothing
+   * here, so there is nothing worth telling anyone about it.
+   */
+  const reportClientGraph = useCallback((graph: PluginGraph): void => {
+    const report: ClientGraphReport = { graph, at: Date.now() }
+    void fetch(CLIENT_GRAPH_PATH, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(report),
+    }).catch(() => undefined)
+  }, [])
+
+  // Reported on mount and on every browser-scope read. The viewer is opened from
+  // this panel, and it should not have to wait for a second visit before it has
+  // anything to show — but it also must not show a tree older than the last one
+  // the reader actually looked at here.
+  useEffect(() => {
+    if (clientGraph === undefined || scope !== 'host') return
+    try {
+      reportClientGraph(clientGraph())
+    } catch {
+      // A collector that throws leaves this panel exactly as it was; the report is
+      // for another page, not for this one.
+    }
+  }, [clientGraph, reportClientGraph, scope])
 
   useEffect(() => { refresh() }, [refresh])
 
@@ -137,6 +179,11 @@ export function GraphPanel({ t, viewerPath, clientGraph, canvasHeight }: GraphPa
         </div>
       </div>
       <p style={INTRO_STYLE}>{scope === 'client' ? t('introClient') : t('intro')}</p>
+      {/* The age of a snapshot, stated where it is read rather than left to be
+          assumed: the viewer's copy is always one the app collected earlier. */}
+      {scope === 'client' && clientGraphAt !== undefined && clientGraphAt !== null && (
+        <p style={MUTED_STYLE}>{t('clientCollectedAt', { when: new Date(clientGraphAt).toLocaleString() })}</p>
+      )}
       {load.kind === 'loading' && <p style={MUTED_STYLE}>{t('loading')}</p>}
       {load.kind === 'failed' && <p style={FAILED_STYLE}>{t('failed')}</p>}
       {load.kind === 'ready' && (

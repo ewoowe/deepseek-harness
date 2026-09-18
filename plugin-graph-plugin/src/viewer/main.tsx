@@ -19,6 +19,7 @@ import {
   createElement, useCallback, useEffect, useState, type ReactNode,
 } from 'react'
 import { createRoot } from 'react-dom/client'
+import { CLIENT_GRAPH_PATH, type ClientGraphReport } from '../graph-types.ts'
 import { GraphPanel } from '../client/GraphPanel.tsx'
 import { en, type Translate, zh } from '../client/locales.ts'
 
@@ -72,6 +73,20 @@ function pickLocale(): ViewerLocale {
 function Viewer(): ReactNode {
   const [locale] = useState<ViewerLocale>(pickLocale)
   const [height, setHeight] = useState(520)
+  const [clientReport, setClientReport] = useState<ClientGraphReport | null>(null)
+
+  // The browser tree cannot be collected on THIS page: it has no client Cordis,
+  // which is the whole reason the app reports its copy to the host. A 404 simply
+  // means no app has looked at that runtime yet, and the panel then shows the
+  // host's graph alone.
+  useEffect(() => {
+    let live = true
+    void fetch(CLIENT_GRAPH_PATH, { cache: 'no-store' })
+      .then(async (response) => (response.ok ? (await response.json()) as ClientGraphReport : null))
+      .then((report) => { if (live && report !== null) setClientReport(report) })
+      .catch(() => undefined)
+    return () => { live = false }
+  }, [])
 
   useEffect(() => {
     const measure = (): void => {
@@ -96,7 +111,17 @@ function Viewer(): ReactNode {
     document.title = DICTIONARIES[locale].title
   }, [locale])
 
-  return createElement(GraphPanel, { t, viewerPath: null, canvasHeight: height })
+  return createElement(GraphPanel, {
+    t,
+    viewerPath: null,
+    canvasHeight: height,
+    // Spread rather than two nullable props: the panel shows the scope pair only
+    // when it CAN collect that tree, and here it cannot — it only displays one
+    // somebody else collected.
+    ...(clientReport === null
+      ? {}
+      : { clientGraph: () => clientReport.graph, clientGraphAt: clientReport.at }),
+  })
 }
 
 const host = document.getElementById('root')
