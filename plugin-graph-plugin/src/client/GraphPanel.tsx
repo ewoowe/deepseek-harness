@@ -28,12 +28,27 @@ import {
 import { GraphCanvas } from './graph-canvas.tsx'
 import type { Translate } from './locales.ts'
 
+/** Which runtime's tree is on screen. */
+type Scope = 'host' | 'client'
+
 /** Props the two hosts bind for this panel. */
 export interface GraphPanelProps {
   /** Locale-bound translate. */
   readonly t: Translate
   /** Path of the standalone viewer, or null to omit the button that opens it. */
   readonly viewerPath: string | null
+  /**
+   * Collect the BROWSER half's graph, or undefined where there is no browser tree.
+   *
+   * The two trees are separate on purpose and must never be merged: they are
+   * different Cordis runtimes with different plugins and different service names,
+   * so one merged graph would not be a bigger one, it would be a wrong one. That
+   * is why this is a second SOURCE rather than a second set of nodes.
+   *
+   * Absent in the standalone viewer: that page is served by the Node half and has
+   * no client Cordis of its own, so it can only show the host's graph.
+   */
+  readonly clientGraph?: () => PluginGraph
   /**
    * Height of the drawing area in px, or undefined for the canvas's own default.
    * The viewer sizes it to the window; a settings column wants a fixed panel.
@@ -47,17 +62,26 @@ type Load =
   | { readonly kind: 'failed' }
   | { readonly kind: 'ready'; readonly graph: PluginGraph }
 
-export function GraphPanel({ t, viewerPath, canvasHeight }: GraphPanelProps): ReactNode {
+export function GraphPanel({ t, viewerPath, clientGraph, canvasHeight }: GraphPanelProps): ReactNode {
   const [load, setLoad] = useState<Load>({ kind: 'loading' })
   const [selected, setSelected] = useState<string | null>(null)
+  const [scope, setScope] = useState<Scope>('host')
 
   const refresh = useCallback((): void => {
     setLoad({ kind: 'loading' })
     void (async () => {
       try {
-        const response = await fetch(GRAPH_PATH, { cache: 'no-store' })
-        if (!response.ok) throw new Error(`plugin graph: HTTP ${String(response.status)}`)
-        setLoad({ kind: 'ready', graph: (await response.json()) as PluginGraph })
+        // Whichever half has the tree assembles it, and both call the same
+        // `collectGraph`: the host's is FETCHED because the browser cannot see
+        // that runtime, and the browser's is COLLECTED here because the host
+        // cannot see this one.
+        const graph = scope === 'client' && clientGraph !== undefined
+          ? clientGraph()
+          : await fetch(GRAPH_PATH, { cache: 'no-store' }).then(async (response) => {
+            if (!response.ok) throw new Error(`plugin graph: HTTP ${String(response.status)}`)
+            return (await response.json()) as PluginGraph
+          })
+        setLoad({ kind: 'ready', graph })
       } catch {
         // The route is registered by the Node half; a failure here means it is not
         // mounted, and the section says so rather than showing an empty graph —
@@ -65,7 +89,8 @@ export function GraphPanel({ t, viewerPath, canvasHeight }: GraphPanelProps): Re
         setLoad({ kind: 'failed' })
       }
     })()
-  }, [])
+    // Re-reads when the scope changes, because `refresh` is that scope's read.
+  }, [scope, clientGraph])
 
   useEffect(() => { refresh() }, [refresh])
 
@@ -74,6 +99,29 @@ export function GraphPanel({ t, viewerPath, canvasHeight }: GraphPanelProps): Re
       <div style={HEADER_STYLE}>
         <h2 style={HEADING_STYLE}>{t('title')}</h2>
         <div style={HEADER_ACTIONS_STYLE}>
+          {/* Only where there are two trees to choose between. The two buttons
+              sit together because they are one choice — the viewer, which has
+              only the host's graph, shows neither. */}
+          {clientGraph !== undefined && (
+            <>
+              <button
+                type="button"
+                aria-pressed={scope === 'host'}
+                style={SCOPE_STYLE(scope === 'host')}
+                onClick={() => { setScope('host') }}
+              >
+                {t('scopeHost')}
+              </button>
+              <button
+                type="button"
+                aria-pressed={scope === 'client'}
+                style={SCOPE_STYLE(scope === 'client')}
+                onClick={() => { setScope('client') }}
+              >
+                {t('scopeClient')}
+              </button>
+            </>
+          )}
           {viewerPath !== null && (
             <button
               type="button"
@@ -88,7 +136,7 @@ export function GraphPanel({ t, viewerPath, canvasHeight }: GraphPanelProps): Re
           <button type="button" style={REFRESH_STYLE} onClick={refresh}>{t('refresh')}</button>
         </div>
       </div>
-      <p style={INTRO_STYLE}>{t('intro')}</p>
+      <p style={INTRO_STYLE}>{scope === 'client' ? t('introClient') : t('intro')}</p>
       {load.kind === 'loading' && <p style={MUTED_STYLE}>{t('loading')}</p>}
       {load.kind === 'failed' && <p style={FAILED_STYLE}>{t('failed')}</p>}
       {load.kind === 'ready' && (
@@ -323,6 +371,20 @@ function stateLabel(state: string, t: Translate): string {
 }
 
 // --- Styles ---------------------------------------------------------------
+
+/** The scope pair: the active one inverts, so the pair reads as one control. */
+function SCOPE_STYLE(active: boolean): CSSProperties {
+  return {
+    ...REFRESH_STYLE,
+    ...(active
+      ? {
+        background: 'var(--dsw-alias-label-primary)',
+        color: 'var(--dsw-alias-bg-layer-2)',
+        borderColor: 'transparent',
+      }
+      : {}),
+  }
+}
 
 const ROOT_STYLE: CSSProperties = {
   display: 'flex',

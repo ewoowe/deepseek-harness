@@ -22,6 +22,7 @@ import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
+import { collectGraph } from '../collect.ts'
 import { VIEWER_PATH } from '../graph-types.ts'
 import { GraphPanel } from './GraphPanel.tsx'
 import { en, NS, zh } from './locales.ts'
@@ -63,6 +64,11 @@ export function apply(ctx: Context): void {
       // This host is the one with somewhere to send the reader; the viewer
       // renders the same panel with `viewerPath: null`.
       viewerPath: VIEWER_PATH,
+      // The browser's own tree, collected on demand from the PAGE's root context
+      // — not from this plugin's scope, which sees only its own fibers. It is the
+      // same collector the host route runs; see ../collect.ts for why that had to
+      // become one function instead of two.
+      clientGraph: () => collectGraph(ctx.root),
     })))
   })
 }

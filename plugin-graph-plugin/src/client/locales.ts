@@ -7,6 +7,9 @@ export const NS = 'pluginGraph'
 export type MessagesKey =
   | 'title'
   | 'intro'
+  | 'introClient'
+  | 'scopeHost'
+  | 'scopeClient'
   | 'refresh'
   | 'loading'
   | 'failed'
@@ -45,10 +48,13 @@ export type MessagesKey =
 
 const en: Record<MessagesKey, string> = {
   title: 'Plugin graph',
-  intro: 'Which plugin provides the services every other plugin injects, read from the live Cordis runtime. Host side only.',
+  intro: 'Which plugin provides the services every other plugin injects, read from the live Cordis runtime.',
+  introClient: 'The browser half is a separate Cordis runtime with its own plugins and its own service names. The two graphs are not comparable and are never merged — a merged one would be a wrong one, not a bigger one.',
+  scopeHost: 'Host',
+  scopeClient: 'Browser',
   refresh: 'Refresh',
   loading: 'Reading the runtime…',
-  failed: 'Could not read the graph from the host.',
+  failed: 'Could not read the graph.',
   statPlugins: '{value} plugins',
   statEdges: '{value} dependencies',
   statUnresolved: '{value} unresolved',
@@ -85,10 +91,13 @@ const en: Record<MessagesKey, string> = {
 
 const zh: Record<MessagesKey, string> = {
   title: '插件依赖图',
-  intro: '哪个插件提供了其他插件所注入的服务，数据读自运行中的 Cordis 运行时。仅 Host 侧。',
+  intro: '哪个插件提供了其他插件所注入的服务，数据读自运行中的 Cordis 运行时。',
+  introClient: '浏览器侧是另一套 Cordis 运行时：不同的插件、不同的服务名。两张图不可比较、也不合并——合并出来的不是更大的图，而是错的图。',
+  scopeHost: '宿主',
+  scopeClient: '浏览器',
   refresh: '刷新',
   loading: '正在读取运行时…',
-  failed: '无法从 Host 读取依赖图。',
+  failed: '无法读取依赖图。',
   statPlugins: '{value} 个插件',
   statEdges: '{value} 条依赖',
   statUnresolved: '{value} 条未解析',
