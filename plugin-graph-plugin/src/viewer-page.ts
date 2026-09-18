@@ -13,18 +13,30 @@
  * script applies the app's own, and the padding.
  */
 import { THEME_CSS_PATH, VIEWER_SCRIPT_PATH } from './graph-types.ts'
+import { DICTIONARIES, langOf } from './client/locales.ts'
 
 /**
  * Build the document.
+ *
+ * The language arrives in the URL the app opened this page with (`?lang=`), the
+ * same way the colour scheme does, because this page has no cordis runtime and so
+ * no locale service to ask. It is put through {@link langOf} FIRST: the value is
+ * written into the `lang` attribute below, and a query string is not a place to
+ * trust — a whitelist check is what keeps a URL from reaching the document at all.
+ *
+ * Both the `lang` attribute and the title are set here rather than left to the
+ * script, so the tab is labelled correctly in the moment before it runs.
+ * @param asked - the raw `?lang=` value, or null when there was none.
  * @returns a complete HTML page that mounts the viewer.
  */
-export function viewerPage(): string {
+export function viewerPage(asked: string | null): string {
+  const lang = langOf(asked)
   return `<!doctype html>
-<html lang="en">
+<html lang="${lang === 'zh' ? 'zh-CN' : lang}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>dsh plugin graph</title>
+<title>${DICTIONARIES[lang].title}</title>
 <style>
 :root { color-scheme: dark; }
 * { box-sizing: border-box; }

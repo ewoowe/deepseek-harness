@@ -115,139 +115,59 @@ const LABEL_ZOOM = 0.75
  * bound: the pass is allowed to overflow the frame by at most this distance, and
  * the fit absorbs that.
  */
-const MIN_SEPARATION = 16
-const RELAX_PASSES = 60
 
 /** Degree at which a node counts as a hub and keeps its label when zoomed out. */
 const HUB_DEGREE = 5
 
 /**
- * Run the layout.
+ * The radial layout: a node sits closer to the centre the MORE plugins depend on it.
  *
- * Fruchterman-Reingold: every pair repels, every edge pulls, a temperature that
- * decays caps how far a node may travel per step. The classic formulation, kept
- * verbatim where it matters (the `k²/d` and `d²/k` force laws) so the result is
- * a known quantity rather than a tuned accident.
+ * Position is DATA, not physics. "How many plugins depend on me" is a fact about
+ * the composition, and putting the load-bearing plugins at the centre makes the
+ * SHAPE of the deployment readable at a glance: the hubs are the middle, the
+ * leaves are the rim. A force layout cannot say that -- it only knows springs and
+ * repulsion, and a node with no edges ends up wherever the repulsion leaves it,
+ * which was the ring of stuck dots on the border.
+ *
+ * The radius eases with the SQUARE ROOT of the normalized in-degree: linear
+ * would push almost every node (most have in-degree 0-2) out to the rim and leave
+ * the middle empty; the root folds the mid-tier inward so the centre is a genuine
+ * cluster of hubs rather than one lonely dot.
+ *
+ * Angle is a golden-angle walk over the id order, so nodes sharing a ring stay
+ * evenly spaced and the whole arrangement is deterministic.
  * @param graph - the fetched graph.
  * @returns node id → position, in layout units.
  */
 function layoutGraph(graph: PluginGraph): Map<string, Placement> {
-  const count = graph.nodes.length
-  const seat = new Map(graph.nodes.map((node, index) => [node.id, index]))
-  const xs = new Float64Array(count)
-  const ys = new Float64Array(count)
-  const centreX = CANVAS_WIDTH / 2
-  const centreY = CANVAS_HEIGHT / 2
+  const maxRadius = 1100
 
-  // Deterministic start: a golden-angle spiral walked in id order, so the same
-  // composition begins from the same arrangement and therefore ends in one.
-  const spiral = [...graph.nodes].sort((left, right) => left.id.localeCompare(right.id))
-  for (let rank = 0; rank < spiral.length; rank += 1) {
-    const at = seat.get(spiral[rank]!.id)
-    if (at === undefined) continue
-    const radius = Math.sqrt(rank + 0.5) * 30
-    xs[at] = centreX + Math.cos(rank * GOLDEN_ANGLE) * radius
-    ys[at] = centreY + Math.sin(rank * GOLDEN_ANGLE) * radius
-  }
-
-  const links: [number, number][] = []
+  // In-degree: how many plugins depend on this one. Edges point FROM the
+  // consumer TO the provider, so an edge's `to` is a dependency MET.
+  const inDegree = new Map<string, number>(graph.nodes.map(node => [node.id, 0]))
+  let maxIn = 0
   for (const edge of graph.edges) {
-    const from = seat.get(edge.from)
-    const to = seat.get(edge.to)
-    // A self-edge has no direction to pull along and would divide by zero.
-    if (from === undefined || to === undefined || from === to) continue
-    links.push([from, to])
+    const count = (inDegree.get(edge.to) ?? 0) + 1
+    inDegree.set(edge.to, count)
+    if (count > maxIn) maxIn = count
   }
 
-  // Ideal edge length for this canvas density — the balance point between the
-  // repulsion and the spring pull, not a spacing constant.
-  const k = Math.sqrt((CANVAS_WIDTH * CANVAS_HEIGHT) / Math.max(1, count))
-  let temperature = CANVAS_WIDTH / 8
-  const pushX = new Float64Array(count)
-  const pushY = new Float64Array(count)
-
-  for (let step = 0; step < SIMULATION_STEPS; step += 1) {
-    pushX.fill(0)
-    pushY.fill(0)
-
-    for (let i = 0; i < count; i += 1) {
-      for (let j = i + 1; j < count; j += 1) {
-        let dx = xs[i] - xs[j]
-        let dy = ys[i] - ys[j]
-        let distance = Math.sqrt(dx * dx + dy * dy)
-        if (distance < 0.01) {
-          // Coincident nodes have no axis to separate along. Nudge them
-          // deterministically instead of skipping the pair, or they stay stuck
-          // together for the whole run.
-          dx = 0.01 * (i - j)
-          dy = 0.01
-          distance = 0.02
-        }
-        const force = (k * k) / distance
-        pushX[i] += (dx / distance) * force
-        pushY[i] += (dy / distance) * force
-        pushX[j] -= (dx / distance) * force
-        pushY[j] -= (dy / distance) * force
-      }
-    }
-
-    for (const [from, to] of links) {
-      const dx = xs[from] - xs[to]
-      const dy = ys[from] - ys[to]
-      const distance = Math.max(0.01, Math.sqrt(dx * dx + dy * dy))
-      const force = (distance * distance) / k
-      pushX[from] -= (dx / distance) * force
-      pushY[from] -= (dy / distance) * force
-      pushX[to] += (dx / distance) * force
-      pushY[to] += (dy / distance) * force
-    }
-
-    for (let i = 0; i < count; i += 1) {
-      const distance = Math.max(0.01, Math.sqrt(pushX[i] * pushX[i] + pushY[i] * pushY[i]))
-      const travel = Math.min(distance, temperature)
-      // Clamped to the frame rather than pulled by a gravity term. Gravity
-      // cannot bound this layout: the repulsion a node feels is summed over
-      // EVERY other node (≈ n·k²/r), so the pull that balances it would have to
-      // be an order of magnitude stronger than the edge springs (≈ degree·d)
-      // and would collapse the composition into a blob with the edges ignored.
-      // A frame bounds the extent without touching the force balance.
-      xs[i] = Math.min(CANVAS_WIDTH, Math.max(0, xs[i] + (pushX[i] / distance) * travel))
-      ys[i] = Math.min(CANVAS_HEIGHT, Math.max(0, ys[i] + (pushY[i] / distance) * travel))
-    }
-
-    // Linear cooling to zero, the textbook Fruchterman-Reingold schedule. An
-    // exponential decay never actually stops, and the residual drift is what
-    // carried the drawing to ten times the canvas before this was linear.
-    temperature = (CANVAS_WIDTH / 8) * (1 - (step + 1) / SIMULATION_STEPS)
-  }
-
-  // Relaxation: separate every pair the frame pressed together. Deterministic
-  // like the rest — the pair order is the node order and the offsets are halves
-  // of the deficit — and it stops as soon as a pass finds nothing to fix.
-  for (let pass = 0; pass < RELAX_PASSES; pass += 1) {
-    let moved = false
-    for (let i = 0; i < count; i += 1) {
-      for (let j = i + 1; j < count; j += 1) {
-        const dx = xs[j] - xs[i]
-        const dy = ys[j] - ys[i]
-        const distance = Math.sqrt(dx * dx + dy * dy)
-        if (distance >= MIN_SEPARATION) continue
-        moved = true
-        // A coincident pair has no axis; give it a fixed one.
-        const ux = distance < 0.01 ? 1 : dx / distance
-        const uy = distance < 0.01 ? 0 : dy / distance
-        const nudge = (MIN_SEPARATION - distance) / 2
-        xs[i] -= ux * nudge
-        ys[i] -= uy * nudge
-        xs[j] += ux * nudge
-        ys[j] += uy * nudge
-      }
-    }
-    if (!moved) break
-  }
-
-  return new Map(graph.nodes.map((node, index) => [node.id, { x: xs[index], y: ys[index] }]))
+  const placements = new Map<string, Placement>()
+  // The angle walk goes over the ID order (deterministic); the radius is each
+  // node's own in-degree, so the two must not be conflated.
+  const ordered = [...graph.nodes].sort((left, right) => left.id.localeCompare(right.id))
+  ordered.forEach((node, index) => {
+    const normalized = maxIn > 0 ? (inDegree.get(node.id) ?? 0) / maxIn : 0
+    const radius = maxRadius * (1 - Math.sqrt(normalized))
+    const angle = index * GOLDEN_ANGLE
+    placements.set(node.id, {
+      x: Math.cos(angle) * radius,
+      y: Math.sin(angle) * radius,
+    })
+  })
+  return placements
 }
+
 
 /**
  * Extent of a placement set.
@@ -355,8 +275,14 @@ function stateColor(state: string): string {
  * @param degree - number of edges it is an end of.
  * @returns the radius, in layout units.
  */
-function radiusOf(node: GraphNode, degree: number): number {
-  return 4 + Math.min(7, node.provides.length * 1.4 + degree * 0.35)
+/**
+ * Node radius: a node more plugins depend on reads as a bigger dot -- the same
+ * signal the radial layout encodes in distance, echoed in size.
+ * @param inDegree - how many plugins depend on this node.
+ * @returns the radius, in layout units.
+ */
+function radiusOf(inDegree: number): number {
+  return 3 + Math.min(13, inDegree * 0.5)
 }
 
 /** One laid-out node, with the values that do not depend on the view. */
@@ -447,8 +373,8 @@ export interface GraphCanvasProps {
   readonly graph: PluginGraph
   /** Currently selected node id, or null. */
   readonly selected: string | null
-  /** Select a node. */
-  readonly onSelect: (id: string) => void
+  /** Select a node, or `null` to deselect (a plain click on the empty canvas). */
+  readonly onSelect: (id: string | null) => void
   /** Locale-bound translate. */
   readonly t: Translate
   /**
@@ -457,6 +383,15 @@ export interface GraphCanvasProps {
    * to use the window.
    */
   readonly height?: number
+  /**
+   * The selection's detail, drawn INSIDE the canvas while it is fullscreen.
+   *
+   * The fullscreen element is the canvas, so the panel's own detail column is not
+   * on screen at all in that mode: clicking a node would then look like it did
+   * nothing but highlight. The host passes the SAME element it renders in its own
+   * column, so there is one Detail component, not two that drift.
+   */
+  readonly detail?: ReactNode
 }
 
 /**
@@ -465,19 +400,26 @@ export interface GraphCanvasProps {
  * @returns the drawing, its search box, its zoom controls, and its hint line.
  */
 export function GraphCanvas({
-  graph, selected, onSelect, t, height = 520,
+  graph, selected, onSelect, t, height = 520, detail,
 }: GraphCanvasProps): ReactNode {
   // The simulation is memoised on the graph object, so it runs once per fetch
   // rather than once per render.
   const placement = useMemo(() => layoutGraph(graph), [graph])
   const bounds = useMemo(() => boundsOf(placement), [placement])
   const adjacency = useMemo(() => adjacencyOf(graph), [graph])
+  const inDegree = useMemo(() => {
+    const map = new Map<string, number>(graph.nodes.map(node => [node.id, 0]))
+    for (const edge of graph.edges) {
+      map.set(edge.to, (map.get(edge.to) ?? 0) + 1)
+    }
+    return map
+  }, [graph])
   const marks = useMemo<Mark[]>(() => graph.nodes.map(node => ({
     node,
     placement: placement.get(node.id) ?? { x: 0, y: 0 },
-    radius: radiusOf(node, adjacency.get(node.id)?.size ?? 0),
+    radius: radiusOf(inDegree.get(node.id) ?? 0),
     degree: adjacency.get(node.id)?.size ?? 0,
-  })), [graph, placement, adjacency])
+  })), [graph, placement, adjacency, inDegree])
 
   const [hovered, setHovered] = useState<string | null>(null)
   const [query, setQuery] = useState('')
@@ -490,6 +432,8 @@ export function GraphCanvas({
   const [view, setView] = useState<View>(viewRef.current)
   const hostRef = useRef<HTMLDivElement | null>(null)
   const panFrom = useRef<{ readonly x: number; readonly y: number } | null>(null)
+  /** True once this press has moved the view -- a real drag, not a stray click. */
+  const movedRef = useRef(false)
   /** Zoom in flight, or null when the view is settled. */
   const goal = useRef<ZoomGoal | null>(null)
   const frame = useRef<number | null>(null)
@@ -593,6 +537,7 @@ export function GraphCanvas({
     // A pan and an eased zoom both write the view, and the pan is the newer
     // intent — without this the animation would keep overwriting the drag.
     stopZoom()
+    movedRef.current = false
     panFrom.current = { x: event.clientX, y: event.clientY }
     event.currentTarget.setPointerCapture(event.pointerId)
   }, [stopZoom])
@@ -603,16 +548,24 @@ export function GraphCanvas({
     const dx = event.clientX - from.x
     const dy = event.clientY - from.y
     panFrom.current = { x: event.clientX, y: event.clientY }
+    // Any single move over 2px marks this press as a real drag, so its release
+    // will not be mistaken for the click that deselects.
+    if (Math.hypot(dx, dy) > 2) movedRef.current = true
     const current = viewRef.current
     publish({ ...current, tx: current.tx + dx, ty: current.ty + dy })
   }, [publish])
 
   const panEnd = useCallback((event: ReactPointerEvent<SVGRectElement>): void => {
     panFrom.current = null
+    // A press that never moved is a DESELECT: without it, a selection can only
+    // ever be replaced by another one, and the reader has no way back. A press
+    // that DID move was a pan -- the reader's intent was to move the view, and
+    // deselecting on its release would make every pan steal the selection.
+    if (!movedRef.current) onSelect(null)
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId)
     }
-  }, [])
+  }, [onSelect])
 
   const zoomBy = useCallback((factor: number): void => {
     if (box === null) return
@@ -624,6 +577,24 @@ export function GraphCanvas({
     stopZoom()
     publish(fitView(bounds, box.width, box.height))
   }, [bounds, box, publish, stopZoom])
+
+  // Fullscreen for the DRAWING itself: the canvas element becomes the fullscreen
+  // element, so the reader gets the biggest possible view of the graph. The
+  // panel's chrome is left behind on purpose -- a fullscreen view is for looking
+  // at the picture, and Esc or the same button comes back.
+  const [isFullscreen, setIsFullscreen] = useState(false)
+  useEffect(() => {
+    const onChange = (): void => { setIsFullscreen(document.fullscreenElement === hostRef.current) }
+    document.addEventListener('fullscreenchange', onChange)
+    return () => { document.removeEventListener('fullscreenchange', onChange) }
+  }, [])
+  const toggleFullscreen = useCallback((): void => {
+    if (document.fullscreenElement === hostRef.current) {
+      void document.exitFullscreen()
+      return
+    }
+    void hostRef.current?.requestFullscreen()
+  }, [])
 
   // Search matches, or null when the box is empty. Null and "empty set" are
   // different states: the first dims nothing at all, the second dims everything
@@ -667,7 +638,7 @@ export function GraphCanvas({
   return (
     <div
       ref={hostRef}
-      style={{ ...HOST_STYLE, height }}
+      style={{ ...HOST_STYLE, height: isFullscreen ? '100vh' : height }}
       onPointerLeave={() => { setHovered(null) }}
     >
       <svg style={SVG_STYLE}>
@@ -736,10 +707,45 @@ export function GraphCanvas({
         <button type="button" style={CONTROL_STYLE} title={t('zoomIn')} onClick={() => { zoomBy(1.3) }}>+</button>
         <button type="button" style={CONTROL_STYLE} title={t('zoomOut')} onClick={() => { zoomBy(1 / 1.3) }}>−</button>
         <button type="button" style={CONTROL_STYLE} title={t('fitView')} onClick={fit}>{t('fitView')}</button>
+        <button
+          type="button"
+          style={CONTROL_STYLE}
+          title={isFullscreen ? t('exitFullscreen') : t('fullscreen')}
+          onClick={toggleFullscreen}
+        >
+          {isFullscreen ? t('exitFullscreen') : t('fullscreen')}
+        </button>
       </div>
       <div style={HINT_STYLE}>{t('graphHint')}</div>
+      {/* Fullscreen only: outside it the host renders this in its own column. */}
+      {isFullscreen && detail !== undefined && (
+        <div style={FULLSCREEN_DETAIL_STYLE}>{detail}</div>
+      )}
     </div>
   )
+}
+
+/**
+ * The selection's detail, as a floating card over a fullscreen canvas.
+ *
+ * A card rather than a docked column: with margins of its own the graph stays
+ * visible around it, and its height follows the content instead of pretending to
+ * be full height. `top: 52` clears the zoom/fullscreen controls in the corner,
+ * which the card would otherwise cover.
+ */
+const FULLSCREEN_DETAIL_STYLE: CSSProperties = {
+  position: 'absolute',
+  top: 52,
+  right: 12,
+  width: 320,
+  maxHeight: 'calc(100% - 64px)',
+  overflowY: 'auto',
+  padding: 14,
+  boxSizing: 'border-box',
+  borderRadius: 12,
+  border: '0.5px solid var(--dsw-alias-border-l2)',
+  background: 'var(--dsw-alias-bg-layer-1)',
+  boxShadow: '0 8px 28px rgba(0, 0, 0, 0.28)',
 }
 
 // --- Styles ---------------------------------------------------------------

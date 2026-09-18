@@ -5,8 +5,10 @@
  * not a copy of it. The two hosts differ only in what they can supply:
  *
  * - the locale: the app binds `t` through `ctx.locale`, which does not exist on a
- *   page with no cordis runtime, so this one is built from the same dictionaries
- *   in ../client/locales.ts;
+ *   page with no cordis runtime. The app therefore puts the locale it is IN into
+ *   the URL it opens this page with, and `t` is built from the same dictionaries
+ *   in ../client/locales.ts — all seven, not only the two the shell ships. The
+ *   browser's own preferences are the fallback for a page opened directly;
  * - the theme: the panel styles itself with the app's `--dsw-*` design tokens,
  *   which here come from the shim in the served document (../viewer-page.ts)
  *   instead of from the app's theme;
@@ -16,18 +18,12 @@
  * is no module table on this page to answer a bare `react` import.
  */
 import {
-  createElement, useCallback, useEffect, useState, type ReactNode,
+  createElement, useCallback, useEffect, useMemo, useState, type ReactNode,
 } from 'react'
 import { createRoot } from 'react-dom/client'
-import { CLIENT_GRAPH_PATH, type ClientGraphReport } from '../graph-types.ts'
+import { CLIENT_GRAPH_PATH, type ClientGraphReport, type PluginGraph } from '../graph-types.ts'
 import { GraphPanel } from '../client/GraphPanel.tsx'
-import { en, type Translate, zh } from '../client/locales.ts'
-
-/** The dictionaries this page chooses between, by browser language. */
-const DICTIONARIES = { en, zh } as const
-
-/** A locale this page can render in. */
-type ViewerLocale = keyof typeof DICTIONARIES
+import { DICTIONARIES, en, langOf, SUPPORTED_LOCALES, type Translate } from '../client/locales.ts'
 
 /**
  * Height kept for the panel's own chrome above and around the drawing — the
@@ -54,14 +50,24 @@ function interpolate(template: string, params?: Record<string, unknown>): string
 }
 
 /**
- * The browser's preferred language, restricted to the ones this page carries.
- * @returns 'zh' or 'en'.
+ * The locale this page should render in.
+ *
+ * The app's own choice wins whenever it said one: that is what the `?lang=`
+ * parameter is for, and it is what makes this page follow a language switch in
+ * the app rather than guessing from the browser — which is the bug that made it
+ * render English inside a Spanish or Japanese interface. Only a page opened
+ * directly (no parameter) falls back to the browser's preferences.
+ * @returns one of `SUPPORTED_LOCALES`.
  */
-function pickLocale(): ViewerLocale {
+function pickLocale(): string {
+  const asked = new URLSearchParams(window.location.search).get('lang')
+  if (asked !== null) return langOf(asked)
   for (const tag of navigator.languages ?? [navigator.language]) {
     const lower = tag.toLowerCase()
-    if (lower.startsWith('zh')) return 'zh'
-    if (lower.startsWith('en')) return 'en'
+    // A region subtag matches (`es-419` is Spanish); a word that merely begins
+    // with those letters does not (`est` is not `es`).
+    const hit = SUPPORTED_LOCALES.find(id => lower === id || lower.startsWith(`${id}-`))
+    if (hit !== undefined) return hit
   }
   return 'en'
 }
@@ -71,9 +77,15 @@ function pickLocale(): ViewerLocale {
  * @returns the panel, translated, sized to the window.
  */
 function Viewer(): ReactNode {
-  const [locale] = useState<ViewerLocale>(pickLocale)
+  const [locale] = useState<string>(pickLocale)
   const [height, setHeight] = useState(520)
   const [clientReport, setClientReport] = useState<ClientGraphReport | null>(null)
+  // Stable identity across renders: a fresh arrow here would change a prop the
+  // panel's fetch effect depends on, re-reading the graph on every render.
+  const clientGraph = useMemo(
+    (): (() => PluginGraph) | null => (clientReport === null ? null : () => clientReport.graph),
+    [clientReport],
+  )
 
   // The browser tree cannot be collected on THIS page: it has no client Cordis,
   // which is the whole reason the app reports its copy to the host. A 404 simply
@@ -100,15 +112,20 @@ function Viewer(): ReactNode {
   }, [])
 
   const t = useCallback<Translate>(
-    (key, params) => interpolate(DICTIONARIES[locale][key], params),
+    // `?? en` is unreachable in practice — `locale` comes from `langOf` or from
+    // `SUPPORTED_LOCALES`, both of which answer with a dictionary that exists —
+    // but it is what lets the index be typed without an assertion.
+    (key, params) => interpolate((DICTIONARIES[locale] ?? en)[key], params),
     [locale],
   )
 
   // Set from the dictionary rather than hardcoded in the document, so the tab
-  // title and the on-page heading agree.
+  // title and the on-page heading agree. Reaches the tab a moment after paint on
+  // a page opened directly; the served document already carries both for the case
+  // the app opened it (see ../viewer-page.ts).
   useEffect(() => {
-    document.documentElement.lang = locale === 'zh' ? 'zh-CN' : 'en'
-    document.title = DICTIONARIES[locale].title
+    document.documentElement.lang = locale === 'zh' ? 'zh-CN' : locale
+    document.title = (DICTIONARIES[locale] ?? en).title
   }, [locale])
 
   return createElement(GraphPanel, {
@@ -117,10 +134,12 @@ function Viewer(): ReactNode {
     canvasHeight: height,
     // Spread rather than two nullable props: the panel shows the scope pair only
     // when it CAN collect that tree, and here it cannot — it only displays one
-    // somebody else collected.
-    ...(clientReport === null
+    // somebody else collected. The collector is memoised so its identity is stable
+    // between renders: a fresh arrow would re-run the panel's fetch effect on every
+    // render of this page.
+    ...(clientGraph === null || clientReport === null
       ? {}
-      : { clientGraph: () => clientReport.graph, clientGraphAt: clientReport.at }),
+      : { clientGraph, clientGraphAt: clientReport.at }),
   })
 }
 

@@ -20,7 +20,7 @@
  * contract worth owning, and a panel that reads it on mount is always current
  * when opened.
  */
-import { useCallback, useEffect, useState, type CSSProperties, type ReactNode } from 'react'
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import {
   CLIENT_GRAPH_PATH,
   GRAPH_PATH,
@@ -64,6 +64,16 @@ export interface GraphPanelProps {
    * The viewer sizes it to the window; a settings column wants a fixed panel.
    */
   readonly canvasHeight?: number
+  /**
+   * The app's current locale id, or undefined where nothing can answer for it.
+   *
+   * A FUNCTION, not a value, because the reader can switch language while this
+   * panel is mounted: a captured string would open the viewer in the language the
+   * app happened to be in when the settings section first appeared. Absent in the
+   * standalone viewer itself, which has no locale service to ask — and no button
+   * to open, since it passes `viewerPath: null`.
+   */
+  readonly activeLocale?: () => string
 }
 
 /** What the panel is currently showing. */
@@ -73,14 +83,19 @@ type Load =
   | { readonly kind: 'ready'; readonly graph: PluginGraph }
 
 export function GraphPanel({
-  t, viewerPath, clientGraph, clientGraphAt, canvasHeight,
+  t, viewerPath, clientGraph, clientGraphAt, canvasHeight, activeLocale,
 }: GraphPanelProps): ReactNode {
   const [load, setLoad] = useState<Load>({ kind: 'loading' })
   const [selected, setSelected] = useState<string | null>(null)
   const [scope, setScope] = useState<Scope>('host')
 
   const refresh = useCallback((): void => {
-    setLoad({ kind: 'loading' })
+    // Keep whatever is on screen while re-reading. Blanking the panel UNMOUNTS the
+    // canvas, and the canvas can be the fullscreen element -- the browser exits
+    // fullscreen the moment its element leaves the document, which is exactly the
+    // "clicked fullscreen and it came straight back" that was reported. A graph
+    // already on screen is also better than a spinner between two identical reads.
+    setLoad(current => (current.kind === 'ready' ? current : { kind: 'loading' }))
     void (async () => {
       try {
         // Whichever half has the tree assembles it, and both call the same
@@ -169,11 +184,17 @@ export function GraphPanel({
               type="button"
               style={REFRESH_STYLE}
               // `noopener`: same-origin, but a fresh document has no business
-              // reaching back through `window.opener`. The scheme travels in the
-              // URL because the viewer cannot read this runtime's theme itself.
+              // reaching back through `window.opener`. The scheme AND the locale
+              // travel in the URL because the viewer cannot read this runtime's
+              // theme or its locale service: it is a page the Node half serves,
+              // with no cordis running on it. Read at CLICK time so a language the
+              // reader switched to a moment ago is the one the new tab opens in.
               onClick={() => {
                 const dark = document.body.hasAttribute('data-ds-dark-theme')
-                window.open(`${viewerPath}?scheme=${dark ? 'dark' : 'light'}`, '_blank', 'noopener')
+                const lang = activeLocale === undefined ? null : activeLocale()
+                const query = new URLSearchParams({ scheme: dark ? 'dark' : 'light' })
+                if (lang !== null) query.set('lang', lang)
+                window.open(`${viewerPath}?${query.toString()}`, '_blank', 'noopener')
               }}
             >
               {t('openInTab')}
@@ -207,7 +228,7 @@ export function GraphPanel({
 function Ready({ graph, selected, onSelect, t, canvasHeight }: {
   readonly graph: PluginGraph
   readonly selected: string | null
-  readonly onSelect: (id: string) => void
+  readonly onSelect: (id: string | null) => void
   readonly t: Translate
   readonly canvasHeight?: number
 }): ReactNode {
@@ -230,6 +251,9 @@ function Ready({ graph, selected, onSelect, t, canvasHeight }: {
             onSelect={onSelect}
             t={t}
             height={canvasHeight}
+            // The same element the column beside it renders: fullscreen draws it
+            // over the canvas instead, because the column is not on screen there.
+            detail={node === null ? undefined : <Detail graph={graph} node={node} onSelect={onSelect} t={t} />}
           />
         </section>
         <section style={COLUMN_STYLE}>

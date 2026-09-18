@@ -126,9 +126,14 @@ export function apply(ctx: Context): void {
     scope.effect(() => scope.webServer.register({
       kind: 'exact',
       path: VIEWER_PATH,
-      handler: (_req, res) => {
+      handler: (req, res) => {
         res.setHeader('content-type', 'text/html; charset=utf-8')
-        res.end(viewerPage())
+        // The app puts its locale in this URL — the page has no locale service of
+        // its own — and `viewerPage` validates it against the dictionaries before
+        // it reaches the document. The base is a placeholder: only the query is
+        // read, because a request target from the wire may be a path alone.
+        const query = new URL(req.url ?? '/', 'http://localhost').searchParams
+        res.end(viewerPage(query.get('lang')))
       },
     }), 'plugin-graph: viewer page')
 
