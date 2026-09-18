@@ -1,0 +1,847 @@
+/**
+ * The drawn dependency graph: a deterministic force layout rendered as SVG, with
+ * wheel zoom, drag pan, and node selection.
+ *
+ * SVG and a hand-rolled layout rather than a graph library, for the same reason
+ * the Node half hand-rolls its collection: this bundle's externals are a
+ * whitelist (`react`/`react-dom`), so a library would be inlined regardless, and
+ * a Fruchterman-Reingold pass is arithmetic that does not need to be a
+ * dependency.
+ *
+ * The layout is DETERMINISTIC — positions are seeded from the node ids, never
+ * from `Math.random` — because the graph is refetched on every open. A layout
+ * that came out differently each time would make the reader re-find their
+ * bearings on every visit, which is the one thing a diagram is for.
+ *
+ * Zoom and pan live in one `View` ({@link View}) rather than in the SVG's
+ * `viewBox`: a `transform` on a group keeps stroke widths and label sizes
+ * independent of the zoom, which is what the counter-scaled labels below rely on.
+ */
+import {
+  useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState,
+  type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode,
+} from 'react'
+import type { GraphEdge, GraphNode, PluginGraph } from '../graph-types.ts'
+import type { Translate } from './locales.ts'
+
+/** One node's position in layout units. */
+interface Placement {
+  readonly x: number
+  readonly y: number
+}
+
+/** Extent of a placement set, in layout units. */
+interface Bounds {
+  readonly minX: number
+  readonly minY: number
+  readonly width: number
+  readonly height: number
+}
+
+/** Pan/zoom of the drawing, where `screen = layout * scale + translate`. */
+interface View {
+  readonly scale: number
+  readonly tx: number
+  readonly ty: number
+}
+
+/**
+ * Target of an eased zoom: the scale to reach and the screen point to reach it
+ * about. Held instead of a finished `View` so consecutive wheel events accumulate
+ * on the SCALE while each one re-anchors where the pointer actually is.
+ *
+ * The anchor's layout coordinates are deliberately NOT stored: every frame
+ * re-derives them from the displayed view, and by construction the last frame put
+ * the goal's point exactly under the goal's screen position — so the two agree,
+ * and only one copy of the anchor arithmetic has to exist (`zoomAt`).
+ */
+interface ZoomGoal {
+  /** Scale to arrive at. */
+  readonly scale: number
+  /** Anchor x, in container coordinates. */
+  readonly screenX: number
+  /** Anchor y, in container coordinates. */
+  readonly screenY: number
+}
+
+/**
+ * Virtual canvas the simulation runs in, and the FRAME the layout is confined
+ * to: positions are clamped to it. The frame is what bounds the drawing's
+ * extent, and the view then fits it to the real box.
+ */
+const CANVAS_WIDTH = 1440
+const CANVAS_HEIGHT = 960
+
+/**
+ * Simulation steps. Sized for a composition of a few hundred nodes: enough for
+ * the hubs to find each other, few enough that opening the section stays
+ * interactive. The pass is O(n²·steps) — about 4M pair updates at 171 nodes.
+ */
+const SIMULATION_STEPS = 280
+
+/** Golden angle, for the deterministic initial spiral. */
+const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5))
+
+/** Zoom clamp, and the padding kept around a fitted drawing, in screen px. */
+const MIN_SCALE = 0.12
+const MAX_SCALE = 5
+const FIT_PADDING = 32
+
+/**
+ * Wheel sensitivity: one notch (`deltaY` ±100) is about ±14%. Applied to
+ * `Math.exp`, so the factor is symmetric — zooming in and back out by the same
+ * number of notches returns to where it started.
+ */
+const WHEEL_SENSITIVITY = 0.0015
+
+/** Fraction of the remaining distance the eased zoom covers per frame (~170ms). */
+const ZOOM_EASE = 0.22
+
+/**
+ * Difference at which the eased zoom is snapped to its target and stopped. An
+ * easing curve only approaches its target, and a scale that never quite arrives
+ * would leave the anchor point a hair off centre.
+ */
+const ZOOM_SETTLE = 0.0008
+
+/** Below this zoom only hubs keep their labels; above it every node does. */
+const LABEL_ZOOM = 0.75
+
+/**
+ * Minimum distance two nodes may end up apart, in layout units, and the cap on
+ * the passes that enforce it. The frame is what bounds the drawing, but it also
+ * presses nodes together where the repulsion has nowhere left to push them, so
+ * the residual overlaps are resolved directly rather than traded for a weaker
+ * bound: the pass is allowed to overflow the frame by at most this distance, and
+ * the fit absorbs that.
+ */
+const MIN_SEPARATION = 16
+const RELAX_PASSES = 60
+
+/** Degree at which a node counts as a hub and keeps its label when zoomed out. */
+const HUB_DEGREE = 5
+
+/**
+ * Run the layout.
+ *
+ * Fruchterman-Reingold: every pair repels, every edge pulls, a temperature that
+ * decays caps how far a node may travel per step. The classic formulation, kept
+ * verbatim where it matters (the `k²/d` and `d²/k` force laws) so the result is
+ * a known quantity rather than a tuned accident.
+ * @param graph - the fetched graph.
+ * @returns node id → position, in layout units.
+ */
+function layoutGraph(graph: PluginGraph): Map<string, Placement> {
+  const count = graph.nodes.length
+  const seat = new Map(graph.nodes.map((node, index) => [node.id, index]))
+  const xs = new Float64Array(count)
+  const ys = new Float64Array(count)
+  const centreX = CANVAS_WIDTH / 2
+  const centreY = CANVAS_HEIGHT / 2
+
+  // Deterministic start: a golden-angle spiral walked in id order, so the same
+  // composition begins from the same arrangement and therefore ends in one.
+  const spiral = [...graph.nodes].sort((left, right) => left.id.localeCompare(right.id))
+  for (let rank = 0; rank < spiral.length; rank += 1) {
+    const at = seat.get(spiral[rank]!.id)
+    if (at === undefined) continue
+    const radius = Math.sqrt(rank + 0.5) * 30
+    xs[at] = centreX + Math.cos(rank * GOLDEN_ANGLE) * radius
+    ys[at] = centreY + Math.sin(rank * GOLDEN_ANGLE) * radius
+  }
+
+  const links: [number, number][] = []
+  for (const edge of graph.edges) {
+    const from = seat.get(edge.from)
+    const to = seat.get(edge.to)
+    // A self-edge has no direction to pull along and would divide by zero.
+    if (from === undefined || to === undefined || from === to) continue
+    links.push([from, to])
+  }
+
+  // Ideal edge length for this canvas density — the balance point between the
+  // repulsion and the spring pull, not a spacing constant.
+  const k = Math.sqrt((CANVAS_WIDTH * CANVAS_HEIGHT) / Math.max(1, count))
+  let temperature = CANVAS_WIDTH / 8
+  const pushX = new Float64Array(count)
+  const pushY = new Float64Array(count)
+
+  for (let step = 0; step < SIMULATION_STEPS; step += 1) {
+    pushX.fill(0)
+    pushY.fill(0)
+
+    for (let i = 0; i < count; i += 1) {
+      for (let j = i + 1; j < count; j += 1) {
+        let dx = xs[i] - xs[j]
+        let dy = ys[i] - ys[j]
+        let distance = Math.sqrt(dx * dx + dy * dy)
+        if (distance < 0.01) {
+          // Coincident nodes have no axis to separate along. Nudge them
+          // deterministically instead of skipping the pair, or they stay stuck
+          // together for the whole run.
+          dx = 0.01 * (i - j)
+          dy = 0.01
+          distance = 0.02
+        }
+        const force = (k * k) / distance
+        pushX[i] += (dx / distance) * force
+        pushY[i] += (dy / distance) * force
+        pushX[j] -= (dx / distance) * force
+        pushY[j] -= (dy / distance) * force
+      }
+    }
+
+    for (const [from, to] of links) {
+      const dx = xs[from] - xs[to]
+      const dy = ys[from] - ys[to]
+      const distance = Math.max(0.01, Math.sqrt(dx * dx + dy * dy))
+      const force = (distance * distance) / k
+      pushX[from] -= (dx / distance) * force
+      pushY[from] -= (dy / distance) * force
+      pushX[to] += (dx / distance) * force
+      pushY[to] += (dy / distance) * force
+    }
+
+    for (let i = 0; i < count; i += 1) {
+      const distance = Math.max(0.01, Math.sqrt(pushX[i] * pushX[i] + pushY[i] * pushY[i]))
+      const travel = Math.min(distance, temperature)
+      // Clamped to the frame rather than pulled by a gravity term. Gravity
+      // cannot bound this layout: the repulsion a node feels is summed over
+      // EVERY other node (≈ n·k²/r), so the pull that balances it would have to
+      // be an order of magnitude stronger than the edge springs (≈ degree·d)
+      // and would collapse the composition into a blob with the edges ignored.
+      // A frame bounds the extent without touching the force balance.
+      xs[i] = Math.min(CANVAS_WIDTH, Math.max(0, xs[i] + (pushX[i] / distance) * travel))
+      ys[i] = Math.min(CANVAS_HEIGHT, Math.max(0, ys[i] + (pushY[i] / distance) * travel))
+    }
+
+    // Linear cooling to zero, the textbook Fruchterman-Reingold schedule. An
+    // exponential decay never actually stops, and the residual drift is what
+    // carried the drawing to ten times the canvas before this was linear.
+    temperature = (CANVAS_WIDTH / 8) * (1 - (step + 1) / SIMULATION_STEPS)
+  }
+
+  // Relaxation: separate every pair the frame pressed together. Deterministic
+  // like the rest — the pair order is the node order and the offsets are halves
+  // of the deficit — and it stops as soon as a pass finds nothing to fix.
+  for (let pass = 0; pass < RELAX_PASSES; pass += 1) {
+    let moved = false
+    for (let i = 0; i < count; i += 1) {
+      for (let j = i + 1; j < count; j += 1) {
+        const dx = xs[j] - xs[i]
+        const dy = ys[j] - ys[i]
+        const distance = Math.sqrt(dx * dx + dy * dy)
+        if (distance >= MIN_SEPARATION) continue
+        moved = true
+        // A coincident pair has no axis; give it a fixed one.
+        const ux = distance < 0.01 ? 1 : dx / distance
+        const uy = distance < 0.01 ? 0 : dy / distance
+        const nudge = (MIN_SEPARATION - distance) / 2
+        xs[i] -= ux * nudge
+        ys[i] -= uy * nudge
+        xs[j] += ux * nudge
+        ys[j] += uy * nudge
+      }
+    }
+    if (!moved) break
+  }
+
+  return new Map(graph.nodes.map((node, index) => [node.id, { x: xs[index], y: ys[index] }]))
+}
+
+/**
+ * Extent of a placement set.
+ * @param placement - node id → position.
+ * @returns the bounding box, with a non-zero size so a fit never divides by zero.
+ */
+function boundsOf(placement: Map<string, Placement>): Bounds {
+  let minX = Infinity
+  let minY = Infinity
+  let maxX = -Infinity
+  let maxY = -Infinity
+  for (const { x, y } of placement.values()) {
+    if (x < minX) minX = x
+    if (y < minY) minY = y
+    if (x > maxX) maxX = x
+    if (y > maxY) maxY = y
+  }
+  if (!Number.isFinite(minX)) return { minX: 0, minY: 0, width: 1, height: 1 }
+  return {
+    minX,
+    minY,
+    width: Math.max(1, maxX - minX),
+    height: Math.max(1, maxY - minY),
+  }
+}
+
+/**
+ * Undirected neighbours of every node.
+ *
+ * Undirected on purpose: a reader hovering a hub wants to see everything wired
+ * to it, and "depends on me" is as interesting as "I depend on" — which is the
+ * same argument the detail panel's two edge lists make.
+ * @param graph - the fetched graph.
+ * @returns node id → ids it shares an edge with.
+ */
+function adjacencyOf(graph: PluginGraph): Map<string, Set<string>> {
+  const adjacency = new Map<string, Set<string>>()
+  const link = (from: string, to: string): void => {
+    const set = adjacency.get(from) ?? new Set<string>()
+    set.add(to)
+    adjacency.set(from, set)
+  }
+  for (const edge of graph.edges) {
+    link(edge.from, edge.to)
+    link(edge.to, edge.from)
+  }
+  return adjacency
+}
+
+/** Clamp a zoom factor into the allowed range. */
+function clampScale(scale: number): number {
+  return Math.min(MAX_SCALE, Math.max(MIN_SCALE, scale))
+}
+
+/**
+ * Zoom about a screen point, holding the layout point under it still.
+ * @param view - current pan/zoom.
+ * @param screenX - anchor x, in container coordinates.
+ * @param screenY - anchor y, in container coordinates.
+ * @param factor - scale multiplier; above 1 zooms in.
+ * @returns the new pan/zoom.
+ */
+function zoomAt(view: View, screenX: number, screenY: number, factor: number): View {
+  const scale = clampScale(view.scale * factor)
+  // The anchor is the fixed point of the transform: solve for the translate
+  // that keeps `layout * scale + translate` equal at the anchor.
+  const ratio = scale / view.scale
+  return {
+    scale,
+    tx: screenX - (screenX - view.tx) * ratio,
+    ty: screenY - (screenY - view.ty) * ratio,
+  }
+}
+
+/**
+ * Pan/zoom that fits the whole drawing inside a container.
+ * @param bounds - extent of the layout.
+ * @param width - container width in px.
+ * @param height - container height in px.
+ * @returns the fitted pan/zoom.
+ */
+function fitView(bounds: Bounds, width: number, height: number): View {
+  const scale = clampScale(Math.min(
+    (width - FIT_PADDING * 2) / bounds.width,
+    (height - FIT_PADDING * 2) / bounds.height,
+  ))
+  return {
+    scale,
+    tx: (width - bounds.width * scale) / 2 - bounds.minX * scale,
+    ty: (height - bounds.height * scale) / 2 - bounds.minY * scale,
+  }
+}
+
+/** Node colour by lifecycle state, matching the dots the detail list used. */
+function stateColor(state: string): string {
+  if (state === 'active') return 'var(--dsw-alias-state-success-primary)'
+  if (state === 'failed') return 'var(--dsw-alias-state-error-primary)'
+  return 'var(--dsw-alias-label-tertiary)'
+}
+
+/**
+ * Node radius. Providers and the well-connected read as hubs before any label
+ * does, which is what makes the shape of the composition legible when zoomed out.
+ * @param node - the node.
+ * @param degree - number of edges it is an end of.
+ * @returns the radius, in layout units.
+ */
+function radiusOf(node: GraphNode, degree: number): number {
+  return 4 + Math.min(7, node.provides.length * 1.4 + degree * 0.35)
+}
+
+/** One laid-out node, with the values that do not depend on the view. */
+interface Mark {
+  readonly node: GraphNode
+  readonly placement: Placement
+  readonly radius: number
+  readonly degree: number
+}
+
+interface EdgeMarkProps {
+  readonly edge: GraphEdge
+  readonly from: Placement
+  readonly to: Placement
+  /** True when a highlight is active and this edge is not part of it. */
+  readonly dim: boolean
+  /** True when this edge belongs to the highlighted node. */
+  readonly lit: boolean
+}
+
+function EdgeMark({ edge, from, to, dim, lit }: EdgeMarkProps): ReactNode {
+  return (
+    <line
+      x1={from.x}
+      y1={from.y}
+      x2={to.x}
+      y2={to.y}
+      // Keeps the stroke one screen pixel wide at every zoom: this is a wire,
+      // not a scaled drawing.
+      vectorEffect="non-scaling-stroke"
+      style={{
+        stroke: lit ? 'var(--dsw-alias-label-secondary)' : 'var(--dsw-alias-border-l2)',
+        strokeWidth: lit ? 1.6 : 1,
+        // Dashed for a runtime acquisition, matching the `optional` badge in
+        // the detail panel — the same distinction, drawn instead of spelled.
+        strokeDasharray: edge.optional ? '3 3' : undefined,
+        opacity: dim ? 0.1 : 0.7,
+      }}
+    />
+  )
+}
+
+interface NodeMarkProps {
+  readonly mark: Mark
+  readonly scale: number
+  readonly focused: boolean
+  readonly dim: boolean
+  readonly label: boolean
+  readonly onSelect: (id: string) => void
+  readonly onHover: (id: string) => void
+}
+
+function NodeMark({ mark, scale, focused, dim, label, onSelect, onHover }: NodeMarkProps): ReactNode {
+  const { node, placement, radius } = mark
+  return (
+    <g
+      transform={`translate(${String(placement.x)},${String(placement.y)})`}
+      style={dim ? DIM_STYLE : undefined}
+      onPointerEnter={() => { onHover(node.id) }}
+      onClick={() => { onSelect(node.id) }}
+    >
+      <circle
+        r={radius}
+        style={{
+          fill: focused ? 'var(--dsw-alias-label-primary)' : stateColor(node.state),
+          stroke: 'var(--dsw-alias-bg-layer-1)',
+          strokeWidth: 1.5,
+          cursor: 'pointer',
+        }}
+      />
+      {label && (
+        // Counter-scaled, so a label stays legible instead of shrinking into a
+        // smudge when the whole composition is in view. The offset has to be
+        // expressed in the counter-scaled frame, hence `radius * scale`.
+        <g transform={`scale(${String(1 / scale)})`}>
+          <text y={radius * scale + 4} textAnchor="middle" style={LABEL_STYLE}>
+            {node.name}
+          </text>
+        </g>
+      )}
+    </g>
+  )
+}
+
+/** Props the hosts hand the canvas. */
+export interface GraphCanvasProps {
+  /** The fetched graph. */
+  readonly graph: PluginGraph
+  /** Currently selected node id, or null. */
+  readonly selected: string | null
+  /** Select a node. */
+  readonly onSelect: (id: string) => void
+  /** Locale-bound translate. */
+  readonly t: Translate
+  /**
+   * Height of the drawing area, in px. A prop because the two hosts sit in very
+   * different boxes: a settings column wants a fixed panel, a whole page wants
+   * to use the window.
+   */
+  readonly height?: number
+}
+
+/**
+ * The canvas: layout, view state, and the two interaction paths.
+ * @param props - see {@link GraphCanvasProps}.
+ * @returns the drawing, its search box, its zoom controls, and its hint line.
+ */
+export function GraphCanvas({
+  graph, selected, onSelect, t, height = 520,
+}: GraphCanvasProps): ReactNode {
+  // The simulation is memoised on the graph object, so it runs once per fetch
+  // rather than once per render.
+  const placement = useMemo(() => layoutGraph(graph), [graph])
+  const bounds = useMemo(() => boundsOf(placement), [placement])
+  const adjacency = useMemo(() => adjacencyOf(graph), [graph])
+  const marks = useMemo<Mark[]>(() => graph.nodes.map(node => ({
+    node,
+    placement: placement.get(node.id) ?? { x: 0, y: 0 },
+    radius: radiusOf(node, adjacency.get(node.id)?.size ?? 0),
+    degree: adjacency.get(node.id)?.size ?? 0,
+  })), [graph, placement, adjacency])
+
+  const [hovered, setHovered] = useState<string | null>(null)
+  const [query, setQuery] = useState('')
+  const [box, setBox] = useState<{ readonly width: number; readonly height: number } | null>(null)
+
+  // The displayed view lives in a ref as well as in state. The easing loop below
+  // runs on `requestAnimationFrame`, where a value captured by the render that
+  // started it is stale by the second frame; state is only the render trigger.
+  const viewRef = useRef<View>({ scale: 1, tx: 0, ty: 0 })
+  const [view, setView] = useState<View>(viewRef.current)
+  const hostRef = useRef<HTMLDivElement | null>(null)
+  const panFrom = useRef<{ readonly x: number; readonly y: number } | null>(null)
+  /** Zoom in flight, or null when the view is settled. */
+  const goal = useRef<ZoomGoal | null>(null)
+  const frame = useRef<number | null>(null)
+
+  /** Write the view to the ref and to the renderer. */
+  const publish = useCallback((next: View): void => {
+    viewRef.current = next
+    setView(next)
+  }, [])
+
+  /** Cancel an eased zoom in flight, leaving the view where it is. */
+  const stopZoom = useCallback((): void => {
+    goal.current = null
+    if (frame.current !== null) {
+      cancelAnimationFrame(frame.current)
+      frame.current = null
+    }
+  }, [])
+
+  /**
+   * Begin, or re-aim, an eased zoom toward `factor × current scale`, about the
+   * given screen point.
+   *
+   * The scale accumulates across events while the anchor is re-read from the
+   * DISPLAYED view each time. That is what makes a fast wheel spin add up instead
+   * of being swallowed frame by frame, without the anchor drifting when the
+   * pointer moves between events.
+   */
+  const startZoom = useCallback((factor: number, screenX: number, screenY: number): void => {
+    goal.current = {
+      scale: clampScale((goal.current?.scale ?? viewRef.current.scale) * factor),
+      screenX,
+      screenY,
+    }
+    if (frame.current !== null) return
+    const tick = (): void => {
+      const target = goal.current
+      if (target === null) { frame.current = null; return }
+      const shown = viewRef.current
+      const eased = clampScale(shown.scale + (target.scale - shown.scale) * ZOOM_EASE)
+      const settled = Math.abs(target.scale - eased) < ZOOM_SETTLE
+      // `zoomAt` rather than the transform written out again: it scales about an
+      // anchor, and the point under that anchor is the one the previous frame put
+      // there — which is the point this zoom exists to hold still.
+      const scale = settled ? target.scale : eased
+      publish(zoomAt(shown, target.screenX, target.screenY, scale / shown.scale))
+      if (settled) { goal.current = null; frame.current = null; return }
+      frame.current = requestAnimationFrame(tick)
+    }
+    frame.current = requestAnimationFrame(tick)
+  }, [publish])
+
+  // A zoom in flight holds a pending frame; abandoning it would let it keep
+  // writing the view of an unmounted canvas.
+  useEffect(() => () => { stopZoom() }, [stopZoom])
+
+  // The container's size is unknown until layout, and the settings column can be
+  // resized while open, so the fit and the zoom buttons both read it from here.
+  //
+  // A layout effect, as is the fit below: measuring after paint would put one
+  // frame of unfitted, wrongly-scaled drawing on screen and then jump.
+  useLayoutEffect(() => {
+    const host = hostRef.current
+    if (host === null) return undefined
+    const measure = (): void => { setBox({ width: host.clientWidth, height: host.clientHeight }) }
+    measure()
+    const observer = new ResizeObserver(measure)
+    observer.observe(host)
+    return () => { observer.disconnect() }
+  }, [])
+
+  // Fit on a new graph and on a new box. A reader who resized the panel wants
+  // the drawing back in view, and a fit is cheap.
+  useLayoutEffect(() => {
+    if (box === null || box.width === 0 || box.height === 0) return
+    stopZoom()
+    publish(fitView(bounds, box.width, box.height))
+  }, [bounds, box, publish, stopZoom])
+
+  // A non-passive listener, not React's `onWheel`: React attaches `wheel` at the
+  // root as passive, so `preventDefault` there cannot stop the settings page from
+  // scrolling behind the canvas.
+  useEffect(() => {
+    const host = hostRef.current
+    if (host === null) return undefined
+    const onWheel = (event: WheelEvent): void => {
+      event.preventDefault()
+      const rect = host.getBoundingClientRect()
+      startZoom(
+        Math.exp(-event.deltaY * WHEEL_SENSITIVITY),
+        event.clientX - rect.left,
+        event.clientY - rect.top,
+      )
+    }
+    host.addEventListener('wheel', onWheel, { passive: false })
+    return () => { host.removeEventListener('wheel', onWheel) }
+  }, [startZoom])
+
+  const panStart = useCallback((event: ReactPointerEvent<SVGRectElement>): void => {
+    if (event.button !== 0) return
+    // A pan and an eased zoom both write the view, and the pan is the newer
+    // intent — without this the animation would keep overwriting the drag.
+    stopZoom()
+    panFrom.current = { x: event.clientX, y: event.clientY }
+    event.currentTarget.setPointerCapture(event.pointerId)
+  }, [stopZoom])
+
+  const panMove = useCallback((event: ReactPointerEvent<SVGRectElement>): void => {
+    const from = panFrom.current
+    if (from === null) return
+    const dx = event.clientX - from.x
+    const dy = event.clientY - from.y
+    panFrom.current = { x: event.clientX, y: event.clientY }
+    const current = viewRef.current
+    publish({ ...current, tx: current.tx + dx, ty: current.ty + dy })
+  }, [publish])
+
+  const panEnd = useCallback((event: ReactPointerEvent<SVGRectElement>): void => {
+    panFrom.current = null
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    }
+  }, [])
+
+  const zoomBy = useCallback((factor: number): void => {
+    if (box === null) return
+    startZoom(factor, box.width / 2, box.height / 2)
+  }, [box, startZoom])
+
+  const fit = useCallback((): void => {
+    if (box === null) return
+    stopZoom()
+    publish(fitView(bounds, box.width, box.height))
+  }, [bounds, box, publish, stopZoom])
+
+  // Search matches, or null when the box is empty. Null and "empty set" are
+  // different states: the first dims nothing at all, the second dims everything
+  // and reads as "no match", which is what an unmatched query has to look like.
+  const matches = useMemo(() => {
+    const needle = query.trim().toLowerCase()
+    if (needle === '') return null
+    const found = new Set<string>()
+    for (const node of graph.nodes) {
+      if (node.name.toLowerCase().includes(needle) || node.id.toLowerCase().includes(needle)) {
+        found.add(node.id)
+      }
+    }
+    return found
+  }, [graph, query])
+
+  // The highlight follows the pointer first, the selection second: hovering is
+  // the exploratory gesture, and it should not require a click to undo. A search
+  // is a third, independent dimming reason — it applies whether or not anything
+  // is hovered, so the two compose instead of one masking the other.
+  const focus = hovered ?? selected
+  const related = focus === null ? null : adjacency.get(focus) ?? null
+  const labelled = view.scale >= LABEL_ZOOM
+  const nodeDim = (id: string): boolean =>
+    (matches !== null && !matches.has(id))
+    || (related !== null && id !== focus && !related.has(id))
+  const nodeLabel = (mark: Mark): boolean =>
+    (matches !== null && matches.has(mark.node.id))
+    || labelled
+    || mark.degree >= HUB_DEGREE
+    || mark.node.id === focus
+    || related?.has(mark.node.id) === true
+  const edgeDim = (edge: GraphEdge): boolean => {
+    // An edge survives a search only when BOTH ends match: one matched endpoint
+    // and one unmatched is precisely the context the search is trying to hide.
+    if (matches !== null && !(matches.has(edge.from) && matches.has(edge.to))) return true
+    if (focus === null) return false
+    return edge.from !== focus && edge.to !== focus
+  }
+
+  return (
+    <div
+      ref={hostRef}
+      style={{ ...HOST_STYLE, height }}
+      onPointerLeave={() => { setHovered(null) }}
+    >
+      <svg style={SVG_STYLE}>
+        {/* The backdrop owns pan and the hover reset. It sits before the drawing
+            so nodes paint over it and take their own pointer events first. */}
+        <rect
+          x={0}
+          y={0}
+          width="100%"
+          height="100%"
+          style={BACKDROP_STYLE}
+          onPointerDown={panStart}
+          onPointerMove={panMove}
+          onPointerUp={panEnd}
+          onPointerCancel={panEnd}
+          onPointerEnter={() => { setHovered(null) }}
+        />
+        <g transform={`translate(${String(view.tx)},${String(view.ty)}) scale(${String(view.scale)})`}>
+          {graph.edges.map((edge) => {
+            const from = placement.get(edge.from)
+            const to = placement.get(edge.to)
+            if (from === undefined || to === undefined) return null
+            return (
+              <EdgeMark
+                key={`${edge.from}|${edge.to}|${edge.service}`}
+                edge={edge}
+                from={from}
+                to={to}
+                lit={focus !== null && (edge.from === focus || edge.to === focus)}
+                dim={edgeDim(edge)}
+              />
+            )
+          })}
+          {marks.map(mark => (
+            <NodeMark
+              key={mark.node.id}
+              mark={mark}
+              scale={view.scale}
+              focused={mark.node.id === focus}
+              dim={nodeDim(mark.node.id)}
+              label={nodeLabel(mark)}
+              onSelect={onSelect}
+              onHover={setHovered}
+            />
+          ))}
+        </g>
+      </svg>
+      <div style={SEARCH_STYLE}>
+        <input
+          type="search"
+          value={query}
+          placeholder={t('searchPlaceholder')}
+          aria-label={t('searchPlaceholder')}
+          onChange={(event) => { setQuery(event.target.value) }}
+          style={SEARCH_INPUT_STYLE}
+        />
+        {/* Only for a non-empty query: a match count next to an empty box would
+            be a number about nothing. */}
+        {matches !== null && (
+          <span style={matches.size === 0 ? SEARCH_NONE_STYLE : SEARCH_COUNT_STYLE}>
+            {matches.size === 0 ? t('searchNone') : t('searchMatches', { value: matches.size })}
+          </span>
+        )}
+      </div>
+      <div style={CONTROLS_STYLE}>
+        <button type="button" style={CONTROL_STYLE} title={t('zoomIn')} onClick={() => { zoomBy(1.3) }}>+</button>
+        <button type="button" style={CONTROL_STYLE} title={t('zoomOut')} onClick={() => { zoomBy(1 / 1.3) }}>−</button>
+        <button type="button" style={CONTROL_STYLE} title={t('fitView')} onClick={fit}>{t('fitView')}</button>
+      </div>
+      <div style={HINT_STYLE}>{t('graphHint')}</div>
+    </div>
+  )
+}
+
+// --- Styles ---------------------------------------------------------------
+
+const HOST_STYLE: CSSProperties = {
+  position: 'relative',
+  borderRadius: 12,
+  background: 'var(--dsw-alias-bg-layer-1)',
+  border: '0.5px solid var(--dsw-alias-border-l2)',
+  overflow: 'hidden',
+  // A drag on the canvas is a pan, not a text selection or a page scroll.
+  touchAction: 'none',
+  userSelect: 'none',
+}
+
+const SVG_STYLE: CSSProperties = {
+  display: 'block',
+  width: '100%',
+  height: '100%',
+}
+
+const BACKDROP_STYLE: CSSProperties = {
+  fill: 'transparent',
+  cursor: 'grab',
+}
+
+const DIM_STYLE: CSSProperties = {
+  opacity: 0.15,
+}
+
+const LABEL_STYLE: CSSProperties = {
+  fill: 'var(--dsw-alias-label-secondary)',
+  fontSize: 10,
+  userSelect: 'none',
+}
+
+const CONTROLS_STYLE: CSSProperties = {
+  position: 'absolute',
+  top: 8,
+  right: 8,
+  display: 'flex',
+  gap: 4,
+}
+
+const CONTROL_STYLE: CSSProperties = {
+  minWidth: 28,
+  height: 28,
+  padding: '0 8px',
+  border: '0.5px solid var(--dsw-alias-border-l2)',
+  borderRadius: 8,
+  background: 'var(--dsw-alias-bg-layer-2)',
+  color: 'var(--dsw-alias-label-secondary)',
+  font: 'inherit',
+  fontSize: 12,
+  cursor: 'pointer',
+}
+
+const SEARCH_STYLE: CSSProperties = {
+  position: 'absolute',
+  top: 8,
+  left: 8,
+  display: 'flex',
+  alignItems: 'center',
+  gap: 6,
+}
+
+const SEARCH_INPUT_STYLE: CSSProperties = {
+  width: 150,
+  height: 28,
+  padding: '0 8px',
+  border: '0.5px solid var(--dsw-alias-border-l2)',
+  borderRadius: 8,
+  background: 'var(--dsw-alias-bg-layer-2)',
+  color: 'var(--dsw-alias-label-primary)',
+  font: 'inherit',
+  fontSize: 12,
+  outline: 'none',
+  // The canvas turns selection off so a drag can pan; the box has to turn it
+  // back on or a query could not be selected or corrected.
+  userSelect: 'text',
+}
+
+const SEARCH_COUNT_STYLE: CSSProperties = {
+  padding: '0 6px',
+  borderRadius: 5,
+  background: 'var(--dsw-alias-bg-layer-2)',
+  color: 'var(--dsw-alias-label-tertiary)',
+  fontSize: 11,
+  fontVariantNumeric: 'tabular-nums',
+}
+
+/** A query that matched nothing is worth noticing, so it is not muted. */
+const SEARCH_NONE_STYLE: CSSProperties = {
+  ...SEARCH_COUNT_STYLE,
+  color: 'var(--dsw-alias-state-error-primary)',
+}
+
+const HINT_STYLE: CSSProperties = {
+  position: 'absolute',
+  left: 10,
+  bottom: 8,
+  color: 'var(--dsw-alias-label-tertiary)',
+  fontSize: 11,
+  pointerEvents: 'none',
+}
