@@ -20,7 +20,7 @@ import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { UsageView, type UsageViewInjected, type UsageViewProps } from './UsageView.tsx'
-import { en, NS, zh } from './locales.ts'
+import { en, NS, PACK_LOCALES, zh } from './locales.ts'
 import { publishModelNames } from './model-names.ts'
 import { readSessionTotals, type SessionTotals } from './format.ts'
 import { turnFactsOf, turnSourcesFor, type TurnFacts, type TurnSource } from './turn-facts.ts'
@@ -49,12 +49,18 @@ export const inject = ['slots', 'sessions', 'locale', 'conversation']
  */
 export function apply(ctx: Context): void {
   // `zh` and `en` are the locales the shell ships, so both go in through the
-  // multi-locale overload: this plugin ships exactly those two for now, and a
-  // language pack's locales stay the pack's business.
-  ctx.effect(
-    () => ctx.locale.register(NS, { zh, en }),
-    'session-usage: dictionaries',
-  )
+  // multi-locale overload. The language-pack locales go in one at a time, through
+  // the single-locale overload the docs reserve for exactly this: the pack owns
+  // the DEFINITION that makes a language selectable, and this plugin contributes
+  // only its own namespace to each. Same arrangement as `session-messages-plugin`.
+  ctx.effect(() => {
+    const disposers = [
+      ctx.locale.register(NS, { zh, en }),
+      ...Object.entries(PACK_LOCALES)
+        .map(([locale, dict]) => ctx.locale.register(NS, locale, dict)),
+    ]
+    return () => { for (const dispose of disposers) dispose() }
+  }, 'session-usage: dictionaries')
 
   ctx.inject(['slots', 'sessions', 'locale'], (scope: ClientContext) => {
     // Bound once, resolved per read: `bind` reads the ACTIVE locale at call time,

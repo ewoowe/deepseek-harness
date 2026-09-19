@@ -223,11 +223,22 @@ after itself.
 
 ## Language
 
-The plugin's own copy ships `zh` and `en` (the two the shell carries), all in
-`src/client/locales.ts`. Both dictionaries are typed `Record<MessagesKey, string>`: a key added
-to `MessagesKey` **fails to compile** until both carry it, so a key can never be silently
-missing and fall back through the `en` chain. That guarantee matters more than the fallback
-chain itself.
+The plugin's own copy ships **seven** dictionaries in `src/client/locales.ts`: `zh` and `en`
+(the two the shell carries) plus `ja`, `ko`, `es`, `fr` and `de`, contributed one namespace at
+a time through the single-locale overload — the language pack a profile carries owns the
+DEFINITION that makes a language selectable, and this plugin adds only its own strings to it.
+It deliberately does not call `addLanguage`.
+
+Every dictionary is typed `Record<MessagesKey, string>`, so a key added to `MessagesKey`
+**fails to compile** until all seven carry it. That guarantee matters more than the `en`
+fallback chain does: without it, a key forgotten in one language resolves to English silently
+and only a reader of that language ever sees it.
+
+Wording is kept consistent with `session-messages`, which already shipped these five — the
+two plugins sit in one interface, so a reader must meet `使用量` / `사용량` / `Uso` /
+`Consommation` / `Verbrauch` in both. Where a language marks nothing but counts (`{count}` has
+no plural rules in the registry), the label leads: `Turnos: {count}`, not `{count} turnos`
+(which reads "1 turnos" in Spanish).
 
 Figures and durations go through this plugin's own dictionary too (`12.2K` / `1.2M`,
 `45.2s` / `2m42s`), because **every language spells them its own way** — they are not constants
@@ -256,7 +267,7 @@ session-usage-plugin/
       Coverage.tsx           the coverage line and "Load the full history"
       table-styles.ts        table chrome shared by both tables, and the page root style
       time-range.ts          fixed ranges, their local calendar bounds, and the custom span's local time
-      locales.ts             the zh / en dictionaries
+      locales.ts             the seven dictionaries (zh, en + the five pack locales)
   lib/                build output (index.js / client.js)
 ```
 
@@ -305,8 +316,10 @@ dialog, sitting beside "Conversation" and "Trajectory" and filling the conversat
   (the host fails closed for it) and the cell stays a dash.
 - **Model display names need the `remote` layer.** Without it the tables print raw ids (such as
   `deepseek-flash`); nothing else changes.
-- **`zh` and `en` only.** Where a language pack makes other locales selectable, this plugin's
-  copy falls back through `en`.
+- **The five non-shell languages need a language pack.** `ja` / `ko` / `es` / `fr` / `de` are
+  registered by this plugin, but a locale only becomes *selectable* when the profile's language
+  pack defines it. Without such a pack those entries never appear in the picker; with one,
+  these strings are already there.
 - **Preferences are global**, not per session: a remembered scroll offset is clamped by the
   browser in a session with shorter content.
 - The composer is made inert in this view with a reason shown (the shell's `conversation.blocks`
