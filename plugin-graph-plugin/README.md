@@ -11,27 +11,33 @@ service, a theme, a window instead of a settings column).
 
 ## Screenshots
 
-The section, as it opens: the graph, the counts, the search box, and a detail column waiting for
-a selection.
+The section, as it opens: the counts, the **status row** (a dot per state the graph has, its
+count, and a click that filters to it), the drawing, and the **four-line key** in the corner.
+The controls above the drawing are `← →` (selection history), zoom, reset and fullscreen.
 
 ![The plugin graph section](docs/plugin-graph-1-en.png)
 
-Selecting a node: the drawing keeps only what touches that node, and the detail column fills in.
+Fullscreen. The canvas IS the fullscreen element, so everything the panel put beside it is off
+screen — which is why the toolbar moves to the top line inside the canvas and the search box
+takes the second.
 
-![A node selected](docs/plugin-graph-2-en.png)
+![Fullscreen](docs/plugin-graph-2-en.png)
 
-The detail itself. **Depends on** names the service *and* the provider that answers it, which is
-the question the graph exists to answer; **Used by** lists every consumer.
+A selected node. Its own description appears under the name, **Listens to** says which events it
+subscribes to, and the wires split by direction — **the key in the corner names which colour is
+which** — dashed where the dependency is only acquired at runtime.
 
-![The detail column](docs/plugin-graph-3-en.png)
+![A node selected](docs/plugin-graph-3-en.png)
 
-Fullscreen: the drawing fills the window and the detail moves onto the canvas as an overlay —
-the column beside it is not on screen there.
+Searching. The matches are listed as a card, each row carrying the package and its state, and the
+drawing dims everything else. The `×` in the field clears it and hands the caret back.
 
-![Fullscreen](docs/plugin-graph-4-en.png)
+![Search results](docs/plugin-graph-4-en.png)
 
-The standalone viewer, opened in a new tab: the same graph at the width of a whole window, with
-the problems block underneath.
+The standalone viewer, opened in a new tab: the same graph at the width of a whole window. Here it
+has the **`(harness)`** node selected — the runtime's own row, which carries everything no plugin
+claims: the services the root fiber provides, the services it injects, and the events it listens
+to. It depends on nothing, so it has incoming wires only.
 
 ![The standalone viewer](docs/plugin-graph-5-en.png)
 
@@ -55,6 +61,15 @@ GETs it back (one path, two methods). The report carries **the instant it was ta
 viewer prints it — a graph a reader believes is current but is not is worse than one that admits
 its age.
 
+The browser tree's **descriptions** come from a route of their own
+(`/dsh-plugin-graph/descriptions`), because the page cannot read `node_modules` while the packages
+it is describing are the same ones: this half reads them and serves a name → description table.
+That read is the one place the two halves differ in capability, and it is why the merge lives in
+`src/describe.ts` — pure, so both halves run one implementation, while only the Node half touches
+`node:fs`. Resolution tries the plugin's own tree first, then bases learned from the host's
+`profileContext.dir`: measured, the obvious bases all land on the checkout, where none of the
+third-party plugins are installed.
+
 ## How a dependency is acquired
 
 A plugin can take a service two ways, and the difference is not cosmetic:
@@ -76,14 +91,58 @@ providers), and the **registry** supplies every live fiber, including ones start
 
 ## Reading the graph
 
-- **Search** filters by name as you type.
-- **Scroll** zooms, **drag** pans, a **click** selects.
-- **Fullscreen** fills the window. The detail follows onto the canvas, because the column is not
-  on screen there.
+- **The layout is data, not physics.** A node sits closer to the middle the more plugins depend on
+  it, and the angle is a golden-angle walk over the ids — so the same composition draws the same
+  picture on every visit, and a refresh never makes the reader find their bearings again. Hubs are
+  the centre; the rim is what nothing depends on.
+- **Refresh** re-reads the graph. It keeps whatever is on screen while it does, rather than
+  blanking to a spinner: the canvas can be the fullscreen element, and an element that leaves the
+  document takes fullscreen with it.
+- **Search** filters by name as you type, and the matches are listed as a card with each
+  package's state beside it — the list is also the way to reach a node that the filter has dimmed
+  off to the edge. The `×` in the field clears the query and returns the caret to it; the field
+  keeps the room for that button whether or not it is showing, so nothing shifts as you type.
+- **The status row** is a legend, a census and a filter at once: one pill per state the graph
+  actually has, its count, and a click that narrows the drawing to that state. It lists only the
+  states present — a row of mostly-zero pills would read as legend for colours nobody can see. The
+  key is always shown; the swatches keep the selected colours whether or not anything is selected,
+  because a reader who has not clicked yet is the one who needs to know what the colours mean.
+- **Scroll** zooms, **drag** pans, a **click** selects. A scroll inside the match card or the
+  detail card scrolls THAT card: they are panels over the drawing, and reaching for them means
+  scrolling a list, not zooming what is behind it.
+- **Back and forward** walk the trail of selected nodes. Choosing a new node after going back
+  drops the forward entries — the same rule a browser applies, for the same reason — and "nothing
+  selected" is a step like any other, so a node can be reached again from either side.
+- **Fullscreen** fills the window. The toolbar and the search box move INSIDE the canvas, on the
+  first two lines, and the detail follows onto it as an overlay: the column beside the drawing is
+  not on screen in that mode.
 - **Open in a new tab** hands the graph to the standalone viewer — a whole page, served by the
   Node half, which is the point: an iframe or a route inside the app would inherit the same
   width the reader is trying to get away from.
 - **Open configuration file** jumps to this plugin's row in the settings editor.
+
+## What a node reports
+
+Selecting a node fills the detail card with everything the runtime knows about that plugin:
+
+- **The package's own description**, read from its `package.json`. Absent rather than empty when
+  the package does not say, or when nothing could read it — drawing no line is the truthful
+  rendering of "this package does not describe itself".
+- **Provides** — the services its fibers registered.
+- **Listens to** — the event names its fibers subscribed to, read from the dispatcher's own table.
+  **One direction only**, and named for it: dispatch never records a publisher, so who *emits* a
+  name is not knowable. Listeners produce no edges either — a listener waits for a name, not for a
+  provider, so it is not a dependency, and drawing it as an edge would be a false one.
+- **Injects** and **Injected at runtime** — the two ways a dependency is acquired, listed apart
+  because they answer different questions; a plugin asking "why did this not load" wants the first.
+- **Depends on** and **Used by** — every edge in both directions, each row naming the service that
+  makes it and whether it is optional.
+
+**`(harness)`** is the one node that is not a plugin: it is the runtime's own row. Services
+provided by a fiber with no Loader entry behind it — the root fiber, and anything started outside
+the entry tree — are credited here rather than dropped, and their injections and listeners come
+with them. It is what keeps `loader` and the environment rows from reading as unresolved
+dependencies of everything that injects them.
 
 ## What the graph reports
 
@@ -138,6 +197,8 @@ plugin-graph-plugin/
     index.ts                 Node half: collectGraph, and the routes below
     graph-types.ts           the wire shape both halves share (types + path constants)
     collect.ts               the collector, one function for both runtimes
+    describe.ts              the description merge, pure — both halves run it, only the
+                             Node half reads package.json
     viewer-page.ts           the standalone page's document, as a string
     viewer/main.tsx          the standalone page's body (React bundled in — that page has no
                              module table to answer a bare `react` import)
@@ -150,7 +211,8 @@ plugin-graph-plugin/
 ```
 
 Routes, all under `/dsh-plugin-graph`: the graph itself, `/view` (the page), `/viewer.js`, and
-`/theme.css` — plus `/client`, which takes a POST from the app and answers a GET for the viewer.
+`/theme.css` — plus `/client`, which takes a POST from the app and answers a GET for the viewer,
+and `/descriptions`, which serves the name → description table for the browser tree.
 
 ## Development
 
