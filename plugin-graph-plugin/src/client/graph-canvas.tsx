@@ -368,7 +368,12 @@ type EdgeRole = 'out' | 'in' | 'none'
  * runtime.
  */
 function edgeStroke(role: EdgeRole): string {
-  if (role === 'out') return 'var(--dsw-alias-brand-primary)'
+  // NOT `brand-primary`: the name sounds like a brand blue and the value is
+  // `neutral-bluish-1000` — a blue-tinted GREY, which is why the outgoing wires
+  // read as grey on screen. `state-business-primary` is the DeepSeek blue
+  // (`rgb(65, 118, 230)` over `deepseek-400` in dark), and being an alias it
+  // adapts to the theme, which the raw `--dsw-static-*` palette would not.
+  if (role === 'out') return 'var(--dsw-alias-state-business-primary)'
   if (role === 'in') return 'var(--dsw-alias-state-warn-primary)'
   return 'var(--dsw-alias-label-secondary)'
 }
@@ -900,11 +905,11 @@ export function GraphCanvas({
           the column name the two directions the same way. */}
       <div style={LEGEND_STYLE}>
         <span style={LEGEND_ITEM_STYLE}>
-          <span style={{ ...LEGEND_LINE_STYLE, background: 'var(--dsw-alias-brand-primary)' }} />
+          <span style={{ ...LEGEND_LINE_STYLE, background: 'var(--dsw-alias-state-business-primary)' }} />
           {t('dependsOn')}
         </span>
         <span style={LEGEND_ITEM_STYLE}>
-          <span style={{ ...LEGEND_DASHED_STYLE, borderTopColor: 'var(--dsw-alias-brand-primary)' }} />
+          <span style={{ ...LEGEND_DASHED_STYLE, borderTopColor: 'var(--dsw-alias-state-business-primary)' }} />
           {t('optionalOut')}
         </span>
         <span style={LEGEND_ITEM_STYLE}>
