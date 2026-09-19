@@ -36,13 +36,19 @@ export type MessagesKey =
   | 'zoomIn'
   | 'zoomOut'
   | 'fitView'
+  // Selection history: back and forward between the nodes a reader visited.
+  | 'historyBack'
+  | 'historyForward'
   | 'fullscreen'
   | 'exitFullscreen'
   | 'openInTab'
   | 'searchPlaceholder'
+  | 'searchClear'
   | 'searchMatches'
   | 'searchNone'
   | 'provides'
+  | 'listens'
+  | 'nothingListens'
   | 'injects'
   | 'injectsOptional'
   | 'nothingProvides'
@@ -53,6 +59,10 @@ export type MessagesKey =
   | 'dependsOn'
   | 'noUsedBy'
   | 'noDependsOn'
+  // The legend's runtime pair: the same two directions, for edges that are drawn
+  // dashed because the dependency is only acquired at runtime.
+  | 'optionalOut'
+  | 'optionalIn'
   | 'unresolvedTitle'
   | 'isolatedTitle'
   | 'unresolvedNone'
@@ -60,6 +70,12 @@ export type MessagesKey =
   | 'stateActive'
   | 'stateFailed'
   | 'stateOther'
+  | 'statePending'
+  | 'stateLoading'
+  | 'stateUnloading'
+  | 'stateDisposed'
+  | 'stateUnloaded'
+  | 'statusTitle'
 
 const en: Record<MessagesKey, string> = {
   title: 'Plugin graph',
@@ -81,13 +97,18 @@ const en: Record<MessagesKey, string> = {
   zoomIn: 'Zoom in',
   zoomOut: 'Zoom out',
   fitView: 'Reset view',
+  historyBack: 'Back',
+  historyForward: 'Forward',
   fullscreen: 'Fullscreen',
   exitFullscreen: 'Exit fullscreen',
   openInTab: 'Open in a new tab',
   searchPlaceholder: 'Find a plugin…',
+  searchClear: 'Clear search',
   searchMatches: '{value} matched',
   searchNone: 'No match',
   provides: 'Provides',
+  listens: 'Listens to',
+  nothingListens: 'Listens to no events.',
   injects: 'Injects',
   injectsOptional: 'Injected at runtime',
   nothingProvides: 'Provides no services.',
@@ -98,13 +119,23 @@ const en: Record<MessagesKey, string> = {
   dependsOn: 'Depends on',
   noUsedBy: 'Nothing depends on it.',
   noDependsOn: 'It depends on nothing in this composition.',
+  optionalOut: 'Depends at runtime',
+  optionalIn: 'Used at runtime',
   unresolvedTitle: 'Unresolved dependencies',
   isolatedTitle: 'Isolated services',
   unresolvedNone: 'Every injected service has a provider.',
   isolatedNone: 'No service is provided under more than one isolation label.',
   stateActive: 'active',
   stateFailed: 'failed',
-  stateOther: 'not loaded',
+  stateOther: 'unknown',
+  // The five states the canvas used to fold into one word. `collect.ts` always
+  // read them apart; this is the renderer finally saying so.
+  statePending: 'pending',
+  stateLoading: 'loading',
+  stateUnloading: 'unloading',
+  stateDisposed: 'disposed',
+  stateUnloaded: 'not loaded',
+  statusTitle: 'Status',
 }
 
 const zh: Record<MessagesKey, string> = {
@@ -127,13 +158,18 @@ const zh: Record<MessagesKey, string> = {
   zoomIn: '放大',
   zoomOut: '缩小',
   fitView: '重置视图',
+  historyBack: '后退',
+  historyForward: '前进',
   fullscreen: '全屏',
   exitFullscreen: '退出全屏',
   openInTab: '新标签页打开',
   searchPlaceholder: '查找插件…',
+  searchClear: '清除搜索',
   searchMatches: '匹配 {value} 个',
   searchNone: '无匹配',
   provides: '提供',
+  listens: '监听的事件',
+  nothingListens: '不监听任何事件。',
   injects: '注入',
   injectsOptional: '运行时注入',
   nothingProvides: '不提供任何服务。',
@@ -144,13 +180,21 @@ const zh: Record<MessagesKey, string> = {
   dependsOn: '依赖',
   noUsedBy: '没有插件依赖它。',
   noDependsOn: '在本组合里它不依赖任何插件。',
+  optionalOut: '运行时依赖',
+  optionalIn: '运行时被依赖',
   unresolvedTitle: '未解析的依赖',
   isolatedTitle: '被隔离的服务',
   unresolvedNone: '每个被注入的服务都有提供者。',
   isolatedNone: '没有服务在多个隔离标签下提供。',
   stateActive: '已激活',
   stateFailed: '失败',
-  stateOther: '未加载',
+  stateOther: '未知',
+  statePending: '待加载',
+  stateLoading: '加载中',
+  stateUnloading: '卸载中',
+  stateDisposed: '已卸载',
+  stateUnloaded: '未加载',
+  statusTitle: '状态',
 }
 
 /** Japanese. Terminology follows `session-messages`' dictionary where it overlaps. */
@@ -174,13 +218,18 @@ const ja: Record<MessagesKey, string> = {
   zoomIn: '拡大',
   zoomOut: '縮小',
   fitView: '表示をリセット',
+  historyBack: '戻る',
+  historyForward: '進む',
   fullscreen: '全画面',
   exitFullscreen: '全画面を終了',
   openInTab: '新しいタブで開く',
   searchPlaceholder: 'プラグインを検索…',
+  searchClear: '検索をクリア',
   searchMatches: '{value} 件一致',
   searchNone: '一致なし',
   provides: '提供',
+  listens: '購読するイベント',
+  nothingListens: 'イベントを購読していません。',
   injects: '注入',
   injectsOptional: '実行時注入',
   nothingProvides: 'サービスを提供していません。',
@@ -191,13 +240,21 @@ const ja: Record<MessagesKey, string> = {
   dependsOn: '依存先',
   noUsedBy: 'これに依存するプラグインはありません。',
   noDependsOn: 'この構成内で依存しているものはありません。',
+  optionalOut: '実行時に依存',
+  optionalIn: '実行時に被依存',
   unresolvedTitle: '未解決の依存',
   isolatedTitle: '分離されたサービス',
   unresolvedNone: '注入されるサービスにはすべて提供元があります。',
   isolatedNone: '複数の分離ラベルで提供されているサービスはありません。',
   stateActive: '有効',
   stateFailed: '失敗',
-  stateOther: '未読み込み',
+  stateOther: '不明',
+  statePending: '待機中',
+  stateLoading: '読み込み中',
+  stateUnloading: '解放中',
+  stateDisposed: '破棄済み',
+  stateUnloaded: '未読み込み',
+  statusTitle: '状態',
 }
 
 /** Korean. Terminology follows `session-messages`' dictionary where it overlaps. */
@@ -221,13 +278,18 @@ const ko: Record<MessagesKey, string> = {
   zoomIn: '확대',
   zoomOut: '축소',
   fitView: '보기 초기화',
+  historyBack: '뒤로',
+  historyForward: '앞으로',
   fullscreen: '전체 화면',
   exitFullscreen: '전체 화면 종료',
   openInTab: '새 탭에서 열기',
   searchPlaceholder: '플러그인 검색…',
+  searchClear: '검색 지우기',
   searchMatches: '{value}개 일치',
   searchNone: '일치 없음',
   provides: '제공',
+  listens: '수신하는 이벤트',
+  nothingListens: '이벤트를 수신하지 않습니다.',
   injects: '주입',
   injectsOptional: '런타임 주입',
   nothingProvides: '제공하는 서비스가 없습니다.',
@@ -238,13 +300,21 @@ const ko: Record<MessagesKey, string> = {
   dependsOn: '의존 대상',
   noUsedBy: '이것에 의존하는 플러그인이 없습니다.',
   noDependsOn: '이 구성에서 의존하는 것이 없습니다.',
+  optionalOut: '런타임 의존',
+  optionalIn: '런타임 피의존',
   unresolvedTitle: '미해결 의존성',
   isolatedTitle: '격리된 서비스',
   unresolvedNone: '주입되는 모든 서비스에 제공자가 있습니다.',
   isolatedNone: '여러 격리 라벨로 제공되는 서비스는 없습니다.',
   stateActive: '활성',
   stateFailed: '실패',
-  stateOther: '미로드',
+  stateOther: '알 수 없음',
+  statePending: '대기 중',
+  stateLoading: '로드 중',
+  stateUnloading: '해제 중',
+  stateDisposed: '해제됨',
+  stateUnloaded: '로드되지 않음',
+  statusTitle: '상태',
 }
 
 /** Spanish. Terminology follows `session-messages`' dictionary where it overlaps. */
@@ -268,13 +338,18 @@ const es: Record<MessagesKey, string> = {
   zoomIn: 'Acercar',
   zoomOut: 'Alejar',
   fitView: 'Restablecer vista',
+  historyBack: 'Atrás',
+  historyForward: 'Adelante',
   fullscreen: 'Pantalla completa',
   exitFullscreen: 'Salir de pantalla completa',
   openInTab: 'Abrir en una pestaña nueva',
   searchPlaceholder: 'Buscar un plugin…',
+  searchClear: 'Borrar la búsqueda',
   searchMatches: '{value} coincidencias',
   searchNone: 'Sin coincidencias',
   provides: 'Provee',
+  listens: 'Escucha',
+  nothingListens: 'No escucha ningún evento.',
   injects: 'Inyecta',
   injectsOptional: 'Inyectado en tiempo de ejecución',
   nothingProvides: 'No provee ningún servicio.',
@@ -285,13 +360,21 @@ const es: Record<MessagesKey, string> = {
   dependsOn: 'Depende de',
   noUsedBy: 'Nada depende de él.',
   noDependsOn: 'No depende de nada en esta composición.',
+  optionalOut: 'Depende en ejecución',
+  optionalIn: 'Se usa en ejecución',
   unresolvedTitle: 'Dependencias sin resolver',
   isolatedTitle: 'Servicios aislados',
   unresolvedNone: 'Todo servicio inyectado tiene proveedor.',
   isolatedNone: 'Ningún servicio se provee bajo más de una etiqueta de aislamiento.',
   stateActive: 'activo',
   stateFailed: 'fallido',
-  stateOther: 'sin cargar',
+  stateOther: 'desconocido',
+  statePending: 'pendiente',
+  stateLoading: 'cargando',
+  stateUnloading: 'descargando',
+  stateDisposed: 'liberado',
+  stateUnloaded: 'sin cargar',
+  statusTitle: 'Estado',
 }
 
 /** French. Terminology follows `session-messages`' dictionary where it overlaps. */
@@ -315,13 +398,18 @@ const fr: Record<MessagesKey, string> = {
   zoomIn: 'Zoom avant',
   zoomOut: 'Zoom arrière',
   fitView: 'Réinitialiser la vue',
+  historyBack: 'Retour',
+  historyForward: 'Suivant',
   fullscreen: 'Plein écran',
   exitFullscreen: 'Quitter le plein écran',
   openInTab: 'Ouvrir dans un nouvel onglet',
   searchPlaceholder: 'Rechercher un plugin…',
+  searchClear: 'Effacer la recherche',
   searchMatches: '{value} correspondances',
   searchNone: 'Aucune correspondance',
   provides: 'Fournit',
+  listens: 'Écoute',
+  nothingListens: 'N’écoute aucun événement.',
   injects: 'Injecte',
   injectsOptional: 'Injecté à l’exécution',
   nothingProvides: 'Ne fournit aucun service.',
@@ -332,13 +420,21 @@ const fr: Record<MessagesKey, string> = {
   dependsOn: 'Dépend de',
   noUsedBy: 'Rien n’en dépend.',
   noDependsOn: 'Ne dépend de rien dans cette composition.',
+  optionalOut: 'Dépend à l’exécution',
+  optionalIn: 'Utilisé à l’exécution',
   unresolvedTitle: 'Dépendances non résolues',
   isolatedTitle: 'Services isolés',
   unresolvedNone: 'Chaque service injecté a un fournisseur.',
   isolatedNone: 'Aucun service n’est fourni sous plus d’une étiquette d’isolation.',
   stateActive: 'actif',
   stateFailed: 'en échec',
-  stateOther: 'non chargé',
+  stateOther: 'inconnu',
+  statePending: 'en attente',
+  stateLoading: 'chargement',
+  stateUnloading: 'déchargement',
+  stateDisposed: 'libéré',
+  stateUnloaded: 'non chargé',
+  statusTitle: 'État',
 }
 
 /** German. Terminology follows `session-messages`' dictionary where it overlaps. */
@@ -362,13 +458,18 @@ const de: Record<MessagesKey, string> = {
   zoomIn: 'Vergrößern',
   zoomOut: 'Verkleinern',
   fitView: 'Ansicht zurücksetzen',
+  historyBack: 'Zurück',
+  historyForward: 'Vor',
   fullscreen: 'Vollbild',
   exitFullscreen: 'Vollbild beenden',
   openInTab: 'In neuem Tab öffnen',
   searchPlaceholder: 'Plugin suchen…',
+  searchClear: 'Suche löschen',
   searchMatches: '{value} Treffer',
   searchNone: 'Kein Treffer',
   provides: 'Bietet',
+  listens: 'Empfängt',
+  nothingListens: 'Empfängt keine Ereignisse.',
   injects: 'Injiziert',
   injectsOptional: 'Zur Laufzeit injiziert',
   nothingProvides: 'Bietet keine Dienste.',
@@ -379,13 +480,23 @@ const de: Record<MessagesKey, string> = {
   dependsOn: 'Hängt ab von',
   noUsedBy: 'Nichts hängt davon ab.',
   noDependsOn: 'Hängt in dieser Komposition von nichts ab.',
+  // Nouns where the pair above is a verb phrase: `Hängt zur Laufzeit ab` would
+  // wrap the legend onto a second line for no gain.
+  optionalOut: 'Laufzeit-Abhängigkeit',
+  optionalIn: 'Laufzeit-Nutzung',
   unresolvedTitle: 'Unaufgelöste Abhängigkeiten',
   isolatedTitle: 'Isolierte Dienste',
   unresolvedNone: 'Jeder injizierte Dienst hat einen Anbieter.',
   isolatedNone: 'Kein Dienst wird unter mehr als einem Isolationslabel bereitgestellt.',
   stateActive: 'aktiv',
   stateFailed: 'fehlgeschlagen',
-  stateOther: 'nicht geladen',
+  stateOther: 'unbekannt',
+  statePending: 'ausstehend',
+  stateLoading: 'lädt',
+  stateUnloading: 'entlädt',
+  stateDisposed: 'freigegeben',
+  stateUnloaded: 'nicht geladen',
+  statusTitle: 'Status',
 }
 
 /**

@@ -46,6 +46,16 @@ export const THEME_CSS_PATH = '/dsh-plugin-graph/theme.css'
 export const CLIENT_GRAPH_PATH = '/dsh-plugin-graph/client'
 
 /**
+ * Path the package descriptions are served at.
+ *
+ * A route of its own rather than a field on the graph, because the caller that
+ * needs it is the page: it collects the BROWSER tree itself and has no host graph
+ * in hand to read descriptions off, yet the packages on that side are the same
+ * ones — only `node_modules` is somewhere the page cannot look.
+ */
+export const DESCRIPTIONS_PATH = '/dsh-plugin-graph/descriptions'
+
+/**
  * One service a plugin injects, and what its declaration gates.
  *
  * A plugin can acquire services two ways, and the difference is not cosmetic:
@@ -86,6 +96,29 @@ export interface GraphNode {
    * across the entry's own fiber and every fiber it started at runtime.
    */
   readonly injects: readonly GraphInjection[]
+  /**
+   * Event names this plugin listens to.
+   *
+   * One direction only, and named for it: the dispatcher keeps a table of
+   * listeners (see `collect.ts`), so who LISTENS is knowable, while who EMITS a
+   * name is not — dispatch never records a publisher. `listens` says which of the
+   * two this is, where a field called `events` would let a reader assume both.
+   */
+  readonly listens: readonly string[]
+  /**
+   * The package's own `package.json` description, when it has one.
+   *
+   * Absent rather than empty when the package does not say, or when nothing could
+   * read it — a virtual entry, a built-in, a path that does not resolve. The
+   * detail panel draws no line at all in that case: "this package does not
+   * describe itself" is a fact about the package, and an empty box would be a
+   * fact about us.
+   *
+   * Filled by the NODE half (`./describe.ts` explains the split), so a graph
+   * fetched from the route always carries whatever could be read; the browser
+   * tree gets them from the same route.
+   */
+  readonly description?: string
 }
 
 /** One dependency edge: the consumer injecting `service`, and the provider. */

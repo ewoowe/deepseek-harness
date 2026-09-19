@@ -102,14 +102,19 @@ function fibersByEntry(ctx: Context): Map<string, Fiber[]> {
   // by UID.
   const seen = new Set<number>()
   const add = (id: string | undefined, fiber: Fiber): void => {
-    if (id === undefined) return
+    // A fiber with no entry behind it belongs to the RUNTIME — the same rule the
+    // provider table below already uses (`record(name, owner ?? ROOT_NODE_ID)`).
+    // Dropping it here instead meant one fiber could be half in the graph: its
+    // service shown under `(harness)` while its injections and listeners went
+    // silently missing.
+    const owner = id ?? ROOT_NODE_ID
     if (typeof fiber.uid === 'number') {
       if (seen.has(fiber.uid)) return
       seen.add(fiber.uid)
     }
-    const fibers = byEntry.get(id) ?? []
+    const fibers = byEntry.get(owner) ?? []
     fibers.push(fiber)
-    byEntry.set(id, fibers)
+    byEntry.set(owner, fibers)
   }
   for (const entry of ctx.loader.entries()) {
     if (entry.fiber !== undefined) add(entry.options.id, entry.fiber)
@@ -120,6 +125,45 @@ function fibersByEntry(ctx: Context): Map<string, Fiber[]> {
     for (const fiber of runtime.fibers) add(ownerNodeId(fiber), fiber)
   })
   return byEntry
+}
+
+/**
+ * Event names each owner listens to, read from the dispatcher's own table.
+ *
+ * `ctx.events._hooks` is in no type declaration — the published API is dispatch
+ * only (`emit` / `parallel` / `serial` / …) — but the implementation keeps one
+ * list per event name, and every entry carries the CONTEXT that registered it
+ * (`{ ctx, callback, prepend }`, measured). That context's fiber is therefore
+ * the same owner a service's provider resolves to, so this walk reuses
+ * {@link ownerNodeId} rather than inventing a second rule for "whose plugin is
+ * this".
+ *
+ * `internal/*` is dropped: those are the framework's own hooks (hot reload, the
+ * listener bookkeeping itself), not what a reader means by "this plugin listens
+ * to". Names are deduped per owner and kept in registration order.
+ *
+ * What this CANNOT report is the other direction — who EMITS a name. Dispatch
+ * reads the table and never writes a publisher down, so there is nothing to
+ * enumerate; `GraphNode.listens` is named to say which half this is.
+ * @param ctx - a context with `events` in scope.
+ * @returns node id → event names.
+ */
+function eventsByOwner(ctx: Context): Map<string, string[]> {
+  const events = (ctx as unknown as {
+    events?: { _hooks?: Record<string, { ctx?: Context }[]> }
+  }).events
+  const byOwner = new Map<string, string[]>()
+  for (const [name, hooks] of Object.entries(events?._hooks ?? {})) {
+    if (name.startsWith('internal/')) continue
+    for (const hook of hooks) {
+      const fiber = (hook.ctx as unknown as { fiber?: Fiber } | undefined)?.fiber
+      const owner = (fiber === undefined ? undefined : ownerNodeId(fiber)) ?? ROOT_NODE_ID
+      const names = byOwner.get(owner) ?? []
+      if (!names.includes(name)) names.push(name)
+      byOwner.set(owner, names)
+    }
+  }
+  return byOwner
 }
 
 /**
@@ -200,6 +244,8 @@ export function collectGraph(ctx: Context): PluginGraph {
     entries.map(entry => [entry.options.id, injectionsOf(entry.options.id)]),
   )
 
+  const listensOf = eventsByOwner(ctx)
+
   const nodes: GraphNode[] = entries.map(entry => ({
     id: entry.options.id,
     name: entry.options.name,
@@ -208,6 +254,7 @@ export function collectGraph(ctx: Context): PluginGraph {
       : (STATE_LABELS[entry.fiber.state as number] ?? String(entry.fiber.state)),
     provides: servicesOfOwner.get(entry.options.id) ?? [],
     injects: injectionsById.get(entry.options.id) ?? [],
+    listens: listensOf.get(entry.options.id) ?? [],
   }))
 
   const harnessServices = servicesOfOwner.get(ROOT_NODE_ID) ?? []
@@ -217,8 +264,13 @@ export function collectGraph(ctx: Context): PluginGraph {
       name: ROOT_NODE_ID,
       state: 'active',
       provides: harnessServices,
-      injects: Object.keys(ctx.root.fiber.inject ?? {})
-        .map(service => ({ service, optional: false })),
+      // Through the same reader every other node uses, rather than reading the
+      // root fiber directly: the `(harness)` bucket now holds every fiber that
+      // belongs to no entry — the root's own and any anonymous ones — and the
+      // root fiber is inside it, so this is a superset of what the direct read
+      // produced. One rule for "what does this node inject".
+      injects: injectionsById.get(ROOT_NODE_ID) ?? [],
+      listens: listensOf.get(ROOT_NODE_ID) ?? [],
     })
   }
 
